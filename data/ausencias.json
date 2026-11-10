@@ -1,0 +1,11 @@
+{
+  "_ayuda": "Lo mantienen las coordinaciones de los dos equipos y se relee en cada ciclo. diasLaborales: 0 = domingo, 1 = lunes … 6 = sábado (por defecto de lunes a viernes; si se asigna los sábados, agregar el 6). Cada ausencia lleva 'persona' (su clave en data/analisis_riesgo/nomina.json o en data/contratos/nomina.json, o \"*\" para todos: así se registran los festivos), 'desde' y 'hasta' (AAAA-MM-DD, ambos incluidos) y 'motivo' opcional. Quien está ausente no recibe casos ni acumula deuda. Hay que agregar los festivos que falten.",
+  "diasLaborales": [1, 2, 3, 4, 5],
+  "ausencias": [
+    { "persona": "*", "desde": "2026-11-16", "hasta": "2026-11-16", "motivo": "Festivo: Independencia de Cartagena" },
+    { "persona": "*", "desde": "2026-12-08", "hasta": "2026-12-08", "motivo": "Festivo: Inmaculada Concepción" },
+    { "persona": "*", "desde": "2026-12-25", "hasta": "2026-12-25", "motivo": "Festivo: Navidad" },
+    { "persona": "*", "desde": "2027-01-01", "hasta": "2027-01-01", "motivo": "Festivo: Año Nuevo" },
+    { "persona": "*", "desde": "2027-01-11", "hasta": "2027-01-11", "motivo": "Festivo: Reyes Magos" }
+  ]
+}

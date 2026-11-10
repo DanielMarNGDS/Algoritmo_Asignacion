@@ -1,0 +1,27 @@
+{
+  "generado": "2026-11-05T21:54:05.260Z",
+  "calibradoCon": {
+    "desde": "2026-04-02",
+    "hasta": "2026-07-03",
+    "casos": 4109
+  },
+  "canonTipico": 2778033,
+  "roles": {
+    "ejecutivo": {
+      "c": 1,
+      "s": 1
+    }
+  },
+  "techos": {
+    "francisco_rocha": 31530000,
+    "laura_calceto": 10528800,
+    "luz_castellanos": 11766000,
+    "andres_amaya": 14624336,
+    "viviana_sanabria": 17325090,
+    "catherin_gomez": 12160000,
+    "andrea_torres": 17118306,
+    "carlos_herrera": 11286230,
+    "luisa_ferro": 12280582,
+    "esteban_saenz": 19404634
+  }
+}

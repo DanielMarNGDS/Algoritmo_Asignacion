@@ -1,0 +1,6 @@
+.env
+node_modules
+logs/
+data/*/nomina.json
+data/PAUSA
+data/*/PAUSA

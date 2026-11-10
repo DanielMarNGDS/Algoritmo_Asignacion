@@ -1,0 +1,27 @@
+{
+  "generado": "2026-11-05T21:53:51.598Z",
+  "calibradoCon": {
+    "desde": "2026-01-01",
+    "hasta": "2026-04-01",
+    "casos": 6584
+  },
+  "canonTipico": 3459724,
+  "roles": {
+    "analista": {
+      "c": 1,
+      "s": 0.663207
+    },
+    "coordinador": {
+      "c": 0.314465,
+      "s": 1
+    }
+  },
+  "techos": {
+    "miller_s": 6000000,
+    "jonatan_h": 5600000,
+    "german_e": 6050000,
+    "jeisson_c": 9541921,
+    "maria_t": 74136750,
+    "eliana_r": 130475214
+  }
+}

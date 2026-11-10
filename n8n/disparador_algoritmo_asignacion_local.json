@@ -1,0 +1,166 @@
+{
+  "name": "disparador_algoritmo_asignacion (local, pruebas)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Versión local, solo para pruebas\n1. Elige la credencial `HubSpot sandbox` en **Cola riesgo** y **Cola contratos**.\n2. Revisa los **Settings** del workflow (guía §3).\n3. n8n tiene que arrancar con `NODES_EXCLUDE='[]'`. Si no, **Correr asignación** aparece con signo de interrogación.\n\nSin `--activar` el script trabaja en **modo sombra**: decide y registra, pero no escribe en HubSpot.",
+        "height": 280,
+        "width": 620
+      },
+      "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b00",
+      "name": "Nota",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-20, -420]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "*/30 30-59 7 * * 1-5" },
+            { "field": "cronExpression", "expression": "*/30 * 8-15 * * 1-5" },
+            { "field": "cronExpression", "expression": "*/30 0-29 16 * * 1-5" }
+          ]
+        }
+      },
+      "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b01",
+      "name": "Cada 30 s",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/2-69460772/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"filterGroups\": [{ \"filters\": [\n    { \"propertyName\": \"hs_pipeline\",       \"operator\": \"EQ\", \"value\": \"935982430\" },\n    { \"propertyName\": \"hs_pipeline_stage\", \"operator\": \"EQ\", \"value\": \"1439946540\" },\n    { \"propertyName\": \"hubspot_owner_id\",  \"operator\": \"NOT_HAS_PROPERTY\" }\n  ]}],\n  \"limit\": 1\n}",
+        "options": {}
+      },
+      "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b02",
+      "name": "Cola riesgo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/2-69460784/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"filterGroups\": [{ \"filters\": [\n    { \"propertyName\": \"hs_pipeline\",       \"operator\": \"EQ\", \"value\": \"935981688\" },\n    { \"propertyName\": \"hs_pipeline_stage\", \"operator\": \"EQ\", \"value\": \"1440128152\" }\n  ]}],\n  \"limit\": 1\n}",
+        "options": {}
+      },
+      "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b03",
+      "name": "Cola contratos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const riesgo = $('Cola riesgo').first().json.total ?? 0;\nconst contratos = $('Cola contratos').first().json.total ?? 0;\n\nconst flujos = [];\nif (riesgo > 0) flujos.push('analisis_riesgo');\nif (contratos > 0) flujos.push('contratos');\n\nreturn [{\n  json: {\n    riesgo,\n    contratos,\n    flujos,\n    argumentos: flujos.map((f) => `--flujo ${f}`).join(' '),\n  },\n}];"
+      },
+      "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b04",
+      "name": "Armar flujos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b11",
+              "leftValue": "={{ $json.flujos.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b05",
+      "name": "¿Hay registros?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "command": "=cd /d \"C:\\Users\\dmartinez\\OneDrive - ngds.biz\\Escritorio\\Segmentador_de_tareas_analisis\" && node asignacion_equilibrada.ts --una-vez {{ $json.argumentos }}"
+      },
+      "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b06",
+      "name": "Correr asignación",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1100, -100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b12",
+              "leftValue": "={{ $json.exitCode }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "notEquals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b07",
+      "name": "¿Falló?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1320, -100]
+    },
+    {
+      "parameters": {
+        "errorType": "errorMessage",
+        "errorMessage": "=La asignación terminó con código {{ $json.exitCode }}: {{ $json.stderr || $json.stdout }}"
+      },
+      "id": "7a2d4b60-1c3e-4f5a-8b9c-1d2e3f4a5b08",
+      "name": "Marcar error",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [1540, -200]
+    }
+  ],
+  "connections": {
+    "Cada 30 s": { "main": [[{ "node": "Cola riesgo", "type": "main", "index": 0 }]] },
+    "Cola riesgo": { "main": [[{ "node": "Cola contratos", "type": "main", "index": 0 }]] },
+    "Cola contratos": { "main": [[{ "node": "Armar flujos", "type": "main", "index": 0 }]] },
+    "Armar flujos": { "main": [[{ "node": "¿Hay registros?", "type": "main", "index": 0 }]] },
+    "¿Hay registros?": { "main": [[{ "node": "Correr asignación", "type": "main", "index": 0 }], []] },
+    "Correr asignación": { "main": [[{ "node": "¿Falló?", "type": "main", "index": 0 }]] },
+    "¿Falló?": { "main": [[{ "node": "Marcar error", "type": "main", "index": 0 }], []] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Bogota",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "meta": {}
+}
