@@ -9,9 +9,10 @@
  *   usa HUBSPOT_TOKEN.
  *
  * Qué revierte, a partir de logs/decisiones.jsonl:
- *   - Lo que escribió el modo activo: a cada registro le devuelve el propietario, la etapa, fecha_asignacion_analista
- *     y asignacion_detalle que tenía antes de la asignación. Solo si sigue como lo dejó el script (mismo propietario,
- *     misma etapa y misma fecha): si alguien lo cambió después, no lo toca y lo informa.
+ *   - Lo que escribió el modo activo: a cada registro le devuelve lo que tenía antes de la asignación en todo lo que la
+ *     decisión guardó (propietario, etapa, fecha de asignación, asignacion_detalle y, en las reasignaciones de
+ *     contratos, el ejecutivo anterior, el número de reasignaciones y su fecha). Solo si sigue como lo dejó el script
+ *     (todo lo escrito igual): si alguien lo cambió después, no lo toca y lo informa.
  *   - Lo que decidió el modo sombra: en HubSpot no hay nada que deshacer. Se saca del log para que el modo sombra lo
  *     vuelva a decidir.
  * Lo revertido sale de logs/decisiones.jsonl y pasa a logs/revertidas.jsonl, con el resultado de cada uno.
@@ -24,11 +25,12 @@ import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } f
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import {
+  API,
   ErrorHubSpot,
   ErrorUso,
   FLUJOS,
-  PROPIEDADES_ESCRITAS,
   RUTA,
+  TODAS_LAS_ESCRITAS,
   cargarEnv,
   crearCliente,
   elegirEntorno,
@@ -88,35 +90,39 @@ const mismaFecha = (a: string | null | undefined, b: string | null | undefined) 
   return x !== null && y !== null && Math.abs(x - y) <= TOLERANCIA_FECHA_MS;
 };
 
-/** El registro sigue como lo dejó el script. */
-const comoLoDejo = (v: Valores, escrito: Valores) =>
-  v.hubspot_owner_id === escrito.hubspot_owner_id &&
-  v.hs_pipeline_stage === escrito.hs_pipeline_stage &&
-  mismaFecha(v.fecha_asignacion_analista, escrito.fecha_asignacion_analista);
+/**
+ * Mismo valor: igual como texto (vacío = vacío) o, en las propiedades de fecha, con menos de un segundo de diferencia.
+ * (Solo en las de fecha: un ownerId también son puros dígitos y se leería como una fecha.)
+ */
+const igual = (propiedad: string, a: string | null | undefined, b: string | null | undefined) =>
+  (vacio(a) && vacio(b)) || a === b || (propiedad.includes("fecha") && mismaFecha(a, b));
+
+/** El registro sigue como lo dejó el script: todo lo que escribió sigue igual. */
+const comoLoDejo = (v: Valores, escrito: Valores) => Object.keys(escrito).every((p) => igual(p, v[p], escrito[p]));
 
 /** El registro ya está como antes de la asignación (la escritura falló o ya se revirtió). */
-const comoEstaba = (v: Valores, anterior: Valores) =>
-  (v.hubspot_owner_id ?? "") === (anterior.hubspot_owner_id ?? "") &&
-  v.hs_pipeline_stage === anterior.hs_pipeline_stage &&
-  (vacio(anterior.fecha_asignacion_analista)
-    ? vacio(v.fecha_asignacion_analista)
-    : mismaFecha(v.fecha_asignacion_analista, anterior.fecha_asignacion_analista));
+const comoEstaba = (v: Valores, anterior: Valores, escrito: Valores) => Object.keys(escrito).every((p) => igual(p, v[p], anterior[p]));
+
+const NOMBRES: Record<string, string> = {
+  hubspot_owner_id: "el propietario",
+  hs_pipeline_stage: "la etapa",
+  fecha_asignacion_analista: "la fecha de asignación",
+  contrato_fechaasignacioncontrato: "la fecha de asignación",
+};
 
 function queCambio(v: Valores, escrito: Valores): string {
-  const cambios = [
-    v.hubspot_owner_id !== escrito.hubspot_owner_id ? "el propietario" : null,
-    v.hs_pipeline_stage !== escrito.hs_pipeline_stage ? "la etapa" : null,
-    !mismaFecha(v.fecha_asignacion_analista, escrito.fecha_asignacion_analista) ? "la fecha de asignación" : null,
-  ].filter(Boolean);
-  return cambios.join(", ");
+  return Object.keys(escrito)
+    .filter((p) => !igual(p, v[p], escrito[p]))
+    .map((p) => NOMBRES[p] ?? p)
+    .join(", ");
 }
 
-/** Lo que se le escribe al registro para dejarlo como estaba. Una etapa no se puede dejar vacía. */
+/** Lo que se le escribe al registro para dejarlo como estaba (todo lo que la decisión guardó). Una etapa no se puede dejar vacía. */
 function cuerpoRestauracion(anterior: Valores): Record<string, string> {
   const props: Record<string, string> = {};
-  for (const p of PROPIEDADES_ESCRITAS) {
-    if (p === "hs_pipeline_stage" && vacio(anterior[p])) continue;
-    props[p] = anterior[p] ?? "";
+  for (const [p, valor] of Object.entries(anterior)) {
+    if (p === "hs_pipeline_stage" && vacio(valor)) continue;
+    props[p] = valor ?? "";
   }
   return props;
 }
@@ -131,7 +137,7 @@ async function etiquetas(hs: ClienteHS, objetos: string[]) {
       const pagina = await hs.solicitar<{
         results: { id: string; firstName?: string; lastName?: string; email?: string }[];
         paging?: { next?: { after: string } };
-      }>("GET", `/crm/v3/owners?limit=500${after ? `&after=${encodeURIComponent(after)}` : ""}`);
+      }>("GET", `/crm/owners/${API}?limit=500${after ? `&after=${encodeURIComponent(decodeURIComponent(after))}` : ""}`);
       for (const o of pagina.results) propietarios.set(o.id, `${o.firstName ?? ""} ${o.lastName ?? ""}`.trim() || o.email || o.id);
       after = pagina.paging?.next?.after;
     } while (after);
@@ -140,7 +146,7 @@ async function etiquetas(hs: ClienteHS, objetos: string[]) {
   }
   for (const objeto of objetos) {
     try {
-      const { results } = await hs.solicitar<{ results: { stages: { id: string; label: string }[] }[] }>("GET", `/crm/v3/pipelines/${objeto}`);
+      const { results } = await hs.solicitar<{ results: { stages: { id: string; label: string }[] }[] }>("GET", `/crm/pipelines/${API}/${objeto}`);
       for (const p of results) for (const s of p.stages) etapas.set(s.id, s.label);
     } catch {
       // Sin nombres de etapas: se muestran los ids.
@@ -233,8 +239,9 @@ async function main(argumentos: string[]): Promise<number> {
     if (guardado) return guardado;
     let valor: Valores | "no existe";
     try {
-      const r = await hs().solicitar<RegistroHS>("GET", `/crm/v3/objects/${objeto}/${id}?properties=${PROPIEDADES_ESCRITAS.join(",")}`);
-      valor = Object.fromEntries(PROPIEDADES_ESCRITAS.map((p) => [p, r.properties[p] ?? null]));
+      // Todo lo que el script ha escrito en cualquier flujo: HubSpot ignora las propiedades que el objeto no tiene.
+      const r = await hs().solicitar<RegistroHS>("GET", `/crm/objects/${API}/${objeto}/${id}?properties=${TODAS_LAS_ESCRITAS.join(",")}`);
+      valor = Object.fromEntries(TODAS_LAS_ESCRITAS.map((p) => [p, r.properties[p] ?? null]));
     } catch (error) {
       if (!(error instanceof ErrorHubSpot && error.status === 404)) throw error;
       valor = "no existe";
@@ -259,7 +266,7 @@ async function main(argumentos: string[]): Promise<number> {
     } else if (comoLoDejo(actual, d.escrito)) {
       pasos.push({ indice, d, accion: "restaurar", motivo: "" });
       actuales.set(`${d.objeto}/${d.id}`, { ...d.anterior });
-    } else if (comoEstaba(actual, d.anterior)) {
+    } else if (comoEstaba(actual, d.anterior, d.escrito)) {
       const motivo = d.escritura === "ok" ? "ya estaba como antes de la asignación" : "la escritura había fallado: HubSpot no cambió";
       pasos.push({ indice, d, accion: "sacar", motivo });
     } else {
@@ -272,7 +279,8 @@ async function main(argumentos: string[]): Promise<number> {
   for (const p of pasos) {
     if (p.accion !== "restaurar" || !nombres) continue;
     const { anterior, escrito } = p.d as Required<Decision>;
-    const fechaYDetalle = vacio(anterior.fecha_asignacion_analista) && vacio(anterior.asignacion_detalle) ? "vacíos" : "los de antes";
+    const fecha = anterior.fecha_asignacion_analista ?? anterior.contrato_fechaasignacioncontrato;
+    const fechaYDetalle = vacio(fecha) && vacio(anterior.asignacion_detalle) ? "vacíos" : "los de antes";
     p.motivo =
       `propietario ${nombres.propietario(escrito.hubspot_owner_id)} → ${nombres.propietario(anterior.hubspot_owner_id)} · ` +
       `etapa ${nombres.etapa(escrito.hs_pipeline_stage)} → ${nombres.etapa(anterior.hs_pipeline_stage)} · fecha y detalle → ${fechaYDetalle}`;
@@ -291,7 +299,7 @@ async function main(argumentos: string[]): Promise<number> {
         continue;
       }
       try {
-        await hs().solicitar("PATCH", `/crm/v3/objects/${p.d.objeto}/${p.d.id}`, { properties: cuerpoRestauracion(p.d.anterior!) });
+        await hs().solicitar("PATCH", `/crm/objects/${API}/${p.d.objeto}/${p.d.id}`, { properties: cuerpoRestauracion(p.d.anterior!) });
         p.resultado = "restaurado";
       } catch (error) {
         p.resultado = `error: ${mensajeDe(error)}`;

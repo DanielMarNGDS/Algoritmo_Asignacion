@@ -2,5 +2,6 @@
 node_modules
 logs/
 data/*/nomina.json
+data/contratos/propietarios.json
 data/PAUSA
 data/*/PAUSA

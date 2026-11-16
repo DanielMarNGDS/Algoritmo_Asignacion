@@ -1,27 +1,19 @@
 {
-  "generado": "2026-11-05T21:53:51.598Z",
+  "generado": "2026-11-16T18:08:03.279Z",
   "calibradoCon": {
-    "desde": "2026-01-01",
-    "hasta": "2026-04-01",
-    "casos": 6584
+    "desde": "2026-04-02",
+    "hasta": "2026-07-03",
+    "casos": 2266
   },
-  "canonTipico": 3459724,
+  "canonTipico": 2507008,
   "roles": {
     "analista": {
       "c": 1,
-      "s": 0.663207
-    },
-    "coordinador": {
-      "c": 0.314465,
       "s": 1
     }
   },
   "techos": {
-    "miller_s": 6000000,
-    "jonatan_h": 5600000,
-    "german_e": 6050000,
-    "jeisson_c": 9541921,
-    "maria_t": 74136750,
-    "eliana_r": 130475214
+    "miller_s": 6858000,
+    "german_e": 7031776
   }
 }
