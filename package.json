@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node asignacion_equilibrada.ts --autoprueba",
+    "e2e": "node pruebas/e2e.mjs",
     "typecheck": "tsc"
   },
   "keywords": [],
