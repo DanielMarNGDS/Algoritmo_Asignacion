@@ -1,9 +1,9 @@
 {
-  "_ayuda": "Lo mantienen las coordinaciones de los dos equipos y se relee en cada ciclo. diasLaborales: 0 = domingo, 1 = lunes … 6 = sábado (por defecto de lunes a viernes; si se asigna los sábados, agregar el 6). Cada ausencia lleva 'persona' (su clave en data/analisis_riesgo/nomina.json o en data/contratos/nomina.json, o \"*\" para todos: así se registran los festivos), 'desde' y 'hasta' (AAAA-MM-DD, ambos incluidos) y 'motivo' opcional. Quien está ausente no recibe casos ni acumula deuda; si una regla le asigna algo fijo, ese registro va al reparto. Los festivos de Colombia están hasta el 31-dic-2027.",
+  "_ayuda": "Lo mantienen las coordinaciones de los dos equipos y se relee en cada ciclo. diasLaborales: 0 = domingo, 1 = lunes … 6 = sábado (por defecto de lunes a viernes; si se asigna los sábados, agregar el 6). Cada ausencia lleva 'persona' (su clave en data/analisis_riesgo/nomina.json o en data/contratos/nomina.json, o \"*\" para todos: así se registran los festivos), 'desde' y 'hasta' (AAAA-MM-DD, ambos incluidos; 'hasta': null es hasta nuevo aviso) y 'motivo' opcional. Quien está ausente no recibe casos ni acumula deuda; si una regla de Contratos le asigna algo fijo, ese contrato va al reparto entre los ejecutivos de directos. Lo directo de Análisis (más de 10 millones y corredores) va a Mónica aunque esté ausente. Los festivos de Colombia están hasta el 31-dic-2027.",
   "diasLaborales": [1, 2, 3, 4, 5],
   "ausencias": [
-    { "persona": "francisco_rocha", "desde": "2026-11-16", "hasta": "2026-12-31", "motivo": "Vacaciones (reglas del 16-nov). Fechas por confirmar con Ana Tavera: la fecha final es provisional" },
-    { "persona": "andres_amaya", "desde": "2026-11-16", "hasta": "2026-12-31", "motivo": "Vacaciones (reglas del 16-nov). Fechas por confirmar con Ana Tavera: la fecha final es provisional" },
+    { "persona": "francisco_rocha", "desde": "2026-11-16", "hasta": null, "motivo": "Vacaciones sin fecha de regreso (reglas del 16-nov): hasta nuevo aviso" },
+    { "persona": "andres_amaya", "desde": "2026-11-16", "hasta": null, "motivo": "Vacaciones sin fecha de regreso (reglas del 16-nov): hasta nuevo aviso" },
 
     { "persona": "*", "desde": "2026-11-16", "hasta": "2026-11-16", "motivo": "Festivo: Independencia de Cartagena" },
     { "persona": "*", "desde": "2026-12-08", "hasta": "2026-12-08", "motivo": "Festivo: Inmaculada Concepción" },

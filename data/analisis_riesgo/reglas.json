@@ -1,11 +1,10 @@
 {
-  "_ayuda": "Reglas de Análisis de riesgo (documento del 16-nov-2026). Lo que cumple una regla de 'directo' va a esa persona sin pasar por el reparto: el monto (canon + administración del negocio asociado) mayor que 'montoMayorA', o cualquiera de las 'condiciones' (propiedad del análisis = valor). Para agregar una etiqueta especial: { \"propiedad\": \"<nombre interno>\", \"valor\": \"true\", \"motivo\": \"<cómo se llama>\" }. 'suplente': la clave de quien recibe lo directo si la persona no está; null = esos registros esperan en la cola. Todo lo demás se reparte entre quienes tienen 'reparto': true en la nómina. Las claves son las de data/analisis_riesgo/nomina.json.",
+  "_ayuda": "Reglas de Análisis de riesgo (documento del 16-nov-2026). Lo que cumple una regla de 'directo' va a esa persona sin pasar por el reparto, siempre, aunque esté marcada ausente: el monto (canon + administración de la Radicación asociada a la Solicitud) mayor que 'montoMayorA', o cualquiera de las 'condiciones' (propiedad del análisis = valor). Para agregar una etiqueta especial: { \"propiedad\": \"<nombre interno>\", \"valor\": \"true\", \"motivo\": \"<cómo se llama>\" }. Solo si la persona deja de estar activa en la nómina esos registros esperan en la cola. Todo lo demás se reparte entre quienes tienen 'reparto': true en la nómina. Las claves son las de data/analisis_riesgo/nomina.json.",
   "directo": {
     "persona": "maria_t",
     "montoMayorA": 10000000,
     "condiciones": [
       { "propiedad": "analisis_corredores", "valor": "true", "motivo": "negocio de corredores" }
     ]
-  },
-  "suplente": null
+  }
 }

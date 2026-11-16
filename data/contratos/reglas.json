@@ -1,13 +1,17 @@
 {
-  "_ayuda": "Reglas de Contratos (documento del 16-nov-2026). El ejecutivo de un contrato sale, en este orden: (1) de la tabla de Ana en data/contratos/asesores.json si la clave del asesor tiene un solo ejecutivo; (2) de data/contratos/propietarios.json si el propietario tiene ejecutivo fijo; (3) de 'clavesCompartidas', repartiendo solo entre esos ejecutivos (mandan sobre la tabla); (4) si el ejecutivo que corresponde no está, o la clave no está en la tabla, del reparto entre los presentes. 'tareaSinAsignar': si un contrato lleva más de 'minutos' en Asignación de ejecutivo y el algoritmo no lo pudo asignar, se crea una tarea para cada responsable (nombre como está en HubSpot, o su ownerId). Las claves de personas son las de data/contratos/nomina.json.",
+  "_ayuda": "Reglas de Contratos (documento del 16-nov-2026). El ejecutivo de un contrato sale, en este orden: (1) de la tabla de Ana en data/contratos/asesores.json si la clave del asesor (la del contrato o la del Asesor asociado) tiene un solo ejecutivo; (2) de data/contratos/propietarios.json si alguno de los arrendadores (contactos 'Arrendador Cto') tiene ejecutivo fijo; (3) de 'clavesCompartidas', repartiendo solo entre esos ejecutivos (mandan sobre la tabla); (4) sin asesor o con una clave fuera de la tabla, del reparto entre los ejecutivos de 'directos'. Si el ejecutivo que corresponde no está (o ninguno de la clave compartida), también reparto entre los de 'directos' presentes; si tampoco hay ninguno, el contrato espera. 'tareaSinAsignar': si un contrato lleva más de 'minutos' en Asignación de ejecutivo y el algoritmo no lo pudo asignar, se crea una tarea para cada responsable. 'tareaReasignacion': si el contrato traía otro ejecutivo, se reemplaza y se crea una tarea para cada responsable con el anterior y el nuevo. Responsables: nombre como está en HubSpot, o su ownerId. Las claves de personas son las de data/contratos/nomina.json.",
   "clavesCompartidas": {
     "44476": ["luz_castellanos", "laura_castro"],
     "44737": ["luz_castellanos", "laura_castro"],
     "55555": ["laura_calceto", "luisa_ferro", "ana_mora", "luz_castellanos", "laura_castro"],
     "99999": ["laura_calceto", "luisa_ferro", "ana_mora", "luz_castellanos", "laura_castro"]
   },
+  "directos": ["laura_calceto", "luisa_ferro", "ana_mora", "luz_castellanos", "laura_castro"],
   "tareaSinAsignar": {
     "minutos": 3,
     "responsables": ["Olga Janneth Sanchez Cortes", "Ana Leonor Tavera Leal"]
+  },
+  "tareaReasignacion": {
+    "responsables": ["Ana Leonor Tavera Leal"]
   }
 }

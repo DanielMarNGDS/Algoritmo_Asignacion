@@ -8,14 +8,17 @@
  * Qué hace: de 7:30 a 4:30 reparte los registros que esperan responsable en dos flujos (ver FLUJOS):
  *   analisis_riesgo  objeto "Análisis de riesgo": de "Asignacion de analista" y de "Aplazado" (solo lo que aplazó el
  *                    motor), siempre sin propietario, a "Analista asignado y en tramite". Lo de más de 10 millones
- *                    (canon + administración del negocio asociado) y lo de corredores va directo a la coordinadora
- *                    de data/analisis_riesgo/reglas.json; lo demás se reparte entre los analistas del reparto.
+ *                    (canon + administración de la Radicación, a la que se llega por la Solicitud asociada) y lo de
+ *                    corredores va directo a la coordinadora de data/analisis_riesgo/reglas.json, aunque esté
+ *                    ausente; lo demás se reparte entre los analistas del reparto.
  *   contratos        objeto "Contratos": de "Asignación de ejecutivo" (traiga o no propietario) a "Consolidación de
  *                    información". Decide primero la tabla de Ana (clave del asesor → ejecutivo), luego la lista de
- *                    propietarios con ejecutivo fijo, luego las claves compartidas; lo demás se reparte. La carga de
- *                    cada ejecutivo son sus contratos abiertos en ese momento.
+ *                    propietarios con ejecutivo fijo (cédulas de los contactos "Arrendador Cto"), luego las claves
+ *                    compartidas; lo demás se reparte entre los ejecutivos de directos. La carga de cada ejecutivo son
+ *                    sus contratos abiertos en ese momento. Si el contrato traía otro ejecutivo, tarea para Ana Tavera.
  * El reparto es una regla greedy de costo marginal (casos y monto). Pone a la persona como propietaria y mueve el
- * registro de etapa. Solo escribe en HubSpot (y, en contratos, una tarea a coordinación si algo no se asigna a tiempo).
+ * registro de etapa. Solo escribe en HubSpot (y, en contratos, tareas a coordinación por reasignaciones y por lo que no
+ * se asigna a tiempo).
  *
  * Uso (Node 24, sin dependencias):
  *   node asignacion_equilibrada.ts                  ciclo continuo cada 2 min en MODO SOMBRA (decide y registra, no escribe)
@@ -44,10 +47,12 @@
  *   logs/revertidas.jsonl             lo que deshizo revertir_asignacion.ts (fase de pruebas)
  *
  * En HubSpot, cada objeto necesita su propiedad de fecha de asignación ("Fecha y hora") y asignacion_detalle ("Texto de
- * varias líneas"): fecha_asignacion_analista en Análisis de riesgo y contrato_fechaasignacioncontrato en Contratos.
- * Contratos usa además contrato_ejecutivo_anterior, contrato_reasignaciones y contrato_fecha_ultima_reasignacion.
+ * varias líneas"): analisis_fechaasignacionanalisis en Análisis de riesgo y contrato_fechaasignacioncontrato en
+ * Contratos (las fechas oficiales). Contratos usa además contrato_ejecutivo_anterior, contrato_reasignaciones y
+ * contrato_fecha_ultima_reasignacion, y lee el Asesor y los contactos asociados.
  * Scopes de la app privada: crm.objects.custom.read y .write, crm.schemas.custom.read, crm.objects.owners.read,
- * crm.objects.deals.read (el monto de Análisis está en el negocio) y el de escritura de tareas.
+ * crm.objects.deals.read (el monto de Análisis está en la Radicación), crm.objects.contacts.read (las cédulas de los
+ * arrendadores) y el de escritura de tareas.
  * Las rutas son las de la versión 2026-09 de la API (v3 se apaga en septiembre de 2027).
  *
  * Variable opcional: HUBSPOT_<FLUJO>_OBJETO (FLUJO = ANALISIS_RIESGO o CONTRATOS) fija el objeto que el diagnóstico
@@ -98,10 +103,16 @@ const EDAD_MAX_PARAMETROS_DIAS = 100; // se recalculan cada trimestre
 const MIN_CASOS_POR_PERSONA = 100; // mínimo para que un P99 tenga sentido
 const EPS = 1e-9;
 const VERSION_MOTOR = "v2";
+const HASTA_NUEVO_AVISO = "9999-12-31";
 const ESCRITURA_SOMBRA = "sombra";
 /** Contratos: de dónde salen la clave del asesor y la cédula del propietario (T_OrdenContrato de AGSSA). */
 export const PROP_CLAVE_ASESOR = "contrato_orden_claveasesorw";
 export const PROP_CEDULA_PROPIETARIO = "contrato_orden_numdocpropw";
+/** Contratos: si el contrato no trae la clave, sale del Asesor asociado (el objeto se descubre por su nombre). */
+export const ASESOR = { nombres: ["asesor", "asesores"], propiedad: "asesor_clave" };
+/** Contratos: los propietarios son los contactos asociados con esta etiqueta; su documento, la primera propiedad con dato. */
+export const ETIQUETA_ARRENDADOR = "Arrendador Cto";
+export const PROPS_DOCUMENTO_CONTACTO = ["contacto_id_numero_documento", "documento", "documento_propietario"];
 
 // ═════════════════════════════════════════════════════════════════════════════
 // 2. TIPOS Y FLUJOS
@@ -220,6 +231,11 @@ export interface Cola {
 export interface Monto {
   /** Tipo del objeto asociado que tiene el monto (p. ej. "0-3", negocios). Sin él, se lee del registro. */
   asociado?: string;
+  /**
+   * Del objeto asociado, el de esta pipeline (y su nombre, para los mensajes). Si el registro no lo tiene asociado
+   * directamente, se busca entre los asociados de sus asociados del mismo tipo (la Solicitud → la Radicación).
+   */
+  pipeline?: { id: string; nombre: string };
   propiedades: string[];
   calcular: (p: Propiedades) => number | null;
   descripcion: string;
@@ -284,12 +300,16 @@ export const FLUJOS: readonly Flujo[] = [
     destino: { etapa: "1439946541", nombre: "Analista asignado y en tramite" },
     colaSinPropietario: true,
     roles: ["analista", "coordinador"],
-    propFecha: "fecha_asignacion_analista",
+    // La fecha oficial (T_Analisis.FechaAsignacionAnalisis). Hasta el 16-nov el script escribía fecha_asignacion_analista.
+    propFecha: "analisis_fechaasignacionanalisis",
     carga: "historial",
     // Con el P99, todo caso de 6 a 10 millones caería siempre en la misma persona; lo de más de 10 va directo (reglas.json).
     conTecho: false,
+    // El Análisis queda asociado a la Solicitud (pipeline 935814405), que no trae el canon; el canon está en la
+    // Radicación (pipeline 935981686) asociada a esa Solicitud.
     monto: {
       asociado: "0-3",
+      pipeline: { id: "935981686", nombre: "Radicación" },
       propiedades: ["radicacion_canon", "radicacion_administracion", "valor_canon___admon"],
       calcular: montoAnalisis,
       descripcion: "canon + administración",
@@ -346,16 +366,27 @@ export interface ConfigHS {
   ownerDeClave: Map<string, string>;
   /** Contratos: los ownerIds que acepta contrato_ejecutivo_anterior (es una lista de opciones). */
   opcionesAnterior: Set<string> | null;
+  /** ownerId → nombre en HubSpot (todos los propietarios, para nombrar al ejecutivo anterior en las tareas). */
+  nombreDeOwner: Map<string, string>;
   /** Contratos: a quién se le crea la tarea si un registro no se asigna a tiempo, y cómo se asocia la tarea. */
-  tarea: { owners: { nombre: string; id: string }[]; asociacion: { associationCategory: string; associationTypeId: number } } | null;
+  tarea: TareaHS | null;
+  /** Contratos: a quién se le crea la tarea cuando el contrato traía otro ejecutivo. */
+  tareaReasignacion: TareaHS | null;
+  /** Contratos: el objeto Asesor y su propiedad de clave, o null si no se encontró (solo cuenta la propiedad del contrato). */
+  asesor: { objeto: string; propiedad: string } | null;
+  /** Contratos: el tipo de asociación contrato → contacto "Arrendador Cto", o null si no existe. */
+  arrendador: { typeId: number } | null;
 }
 
-/** Análisis de riesgo: lo que va directo a una persona, sin pasar por el reparto. */
+export interface TareaHS {
+  owners: { nombre: string; id: string }[];
+  asociacion: { associationCategory: string; associationTypeId: number };
+}
+
+/** Análisis de riesgo: lo que va directo a una persona (aunque esté ausente), sin pasar por el reparto. */
 export interface ReglasAnalisis {
   tipo: "analisis_riesgo";
   directo: { persona: string; montoMayorA: number; condiciones: { propiedad: string; valor: string; motivo: string }[] } | null;
-  /** Quién recibe lo directo si la persona no está. null: esos registros esperan en la cola. */
-  suplente: string | null;
 }
 
 /** Contratos: de qué depende el ejecutivo de un contrato (en el orden en que se aplica). */
@@ -366,9 +397,22 @@ export interface ReglasContratos {
   tabla: { claves: number; fuente: string | null; importado: string | null };
   /** Claves que se reparten entre varios ejecutivos (mandan sobre la tabla). */
   compartidas: Map<string, string[]>;
-  /** Cédula del propietario (normalizada) → ejecutivo fijo. */
+  /** Cédula del propietario (en sus variantes normalizadas) → ejecutivo fijo. */
   propietarios: Map<string, string>;
+  /** Cuántas cédulas tiene la lista (sin contar variantes). */
+  totalPropietarios: number;
+  /** Los ejecutivos de directos: reciben lo que no tiene ejecutivo por regla y lo de un ejecutivo ausente. */
+  directos: string[];
   tarea: { minutos: number; responsables: string[] } | null;
+  tareaReasignacion: { responsables: string[] } | null;
+}
+
+/** Contratos: lo que las reglas leen del contrato y de sus asociados (el Asesor y los contactos "Arrendador Cto"). */
+export interface DatosContrato {
+  /** Clave del asesor (normalizada): la del contrato o, si no la trae, la del Asesor asociado. "" si no hay. */
+  clave: string;
+  /** Documentos de los arrendadores y del propietario de la orden, en sus variantes normalizadas. */
+  cedulas: string[];
 }
 
 export type Reglas = ReglasAnalisis | ReglasContratos;
@@ -534,6 +578,18 @@ export function presentesEn(fecha: string, pool: Persona[], cal: Calendario, ign
 
 /** Los que entran al reparto del algoritmo (los demás solo reciben por regla). */
 export const competidoresDe = (personas: Persona[]): Persona[] => personas.filter((a) => a.reparto);
+
+/** Quién recibe qué, en una línea (consola y diagnóstico). */
+function resumenEquipo(pool: Persona[], reglas: Reglas, personas: string): string {
+  const nombres = (lista: Persona[]) => lista.map((a) => a.etiqueta).join(", ") || "nadie";
+  if (reglas.tipo === "contratos") {
+    const directos = pool.filter((a) => reglas.directos.includes(a.clave));
+    const otros = pool.filter((a) => !reglas.directos.includes(a.clave));
+    return `${directos.length} ${personas} de directos (${nombres(directos)}); los demás reciben solo por su clave de asesor o su propietario: ${nombres(otros)}`;
+  }
+  const soloRegla = pool.filter((a) => !a.reparto);
+  return `reparto entre ${nombres(competidoresDe(pool))}${soloRegla.length ? `; reciben solo por regla: ${nombres(soloRegla)}` : ""}`;
+}
 
 /** Primer día del historial con el que se reconstruyen los saldos (N días hábiles antes de hoy). */
 export function inicioVentana(hoy: string, cal: Calendario, dias: number = VENTANA_DIAS_HABILES): string {
@@ -741,6 +797,8 @@ export function estadoDeCarga(abiertos: Evento[], claves: string[], p: Parametro
 
 /** Todo lo que necesita una regla para decidir, menos el registro. */
 export interface Reparto {
+  /** La nómina activa, con los ausentes: una regla puede mandarle a alguien aunque hoy no esté. */
+  activos: Persona[];
   /** La nómina activa sin los ausentes, en el orden de la nómina (incluye a quien recibe solo por regla). */
   presentes: Persona[];
   /** Los presentes que entran al reparto. */
@@ -771,8 +829,8 @@ function repartir(r: Reparto, entre: Persona[], monto: number | null, regla: str
 
 /**
  * Análisis de riesgo: lo de más de `montoMayorA` (canon + administración) o lo que cumple una condición (negocio de
- * corredores, etiquetas especiales) va directo a la persona de la regla, o a su suplente si ella no está; si ninguno
- * está, espera en la cola. Lo demás se reparte entre los del reparto.
+ * corredores) va directo a la persona de la regla, siempre, aunque esté ausente (reglas del 16-nov). Solo espera en la
+ * cola si esa persona no está activa en la nómina. Lo demás se reparte entre los del reparto.
  */
 export function destinoAnalisis(reglas: ReglasAnalisis, props: Propiedades, monto: number | null, r: Reparto): Destino {
   const d = reglas.directo;
@@ -780,43 +838,74 @@ export function destinoAnalisis(reglas: ReglasAnalisis, props: Propiedades, mont
     const condicion = d.condiciones.find((c) => normalizar(String(props[c.propiedad] ?? "")) === normalizar(c.valor));
     const motivo = monto !== null && monto > d.montoMayorA ? `monto mayor que ${cop(d.montoMayorA)}` : condicion?.motivo;
     if (motivo) {
-      if (estaPresente(r, d.persona)) return { clave: d.persona, regla: `directo a ${r.nombres(d.persona)}: ${motivo}`, decision: null };
-      if (reglas.suplente && estaPresente(r, reglas.suplente)) {
-        return { clave: reglas.suplente, regla: `directo a ${r.nombres(reglas.suplente)}, suplente de ${r.nombres(d.persona)}: ${motivo}`, decision: null };
+      if (!r.activos.some((a) => a.clave === d.persona)) {
+        return { clave: null, regla: `${motivo}: va directo a ${r.nombres(d.persona)}, que no está activa en la nómina`, decision: null };
       }
-      return { clave: null, regla: `${motivo}: va directo a ${r.nombres(d.persona)}, que no está, y no hay suplente presente`, decision: null };
+      const nota = estaPresente(r, d.persona) ? "" : " (aunque hoy figura ausente)";
+      return { clave: d.persona, regla: `directo a ${r.nombres(d.persona)}${nota}: ${motivo}`, decision: null };
     }
   }
   return repartir(r, r.competidores, monto, "reparto");
 }
 
 /**
- * Contratos, en este orden (reglas del 16-nov):
- *   1. La clave del asesor tiene un solo ejecutivo en la tabla de Ana: ese ejecutivo.
- *   2. Si no, el propietario tiene un ejecutivo fijo (correo de Ana): ese ejecutivo.
- *   3. Si no, la clave es compartida: reparto solo entre sus ejecutivos presentes.
- *   4. Si el ejecutivo que corresponde no está (o ninguno de la clave compartida), reparto entre los presentes.
- *   Lo que no decide ninguna regla (sin clave o con una clave fuera de la tabla) también va al reparto.
+ * Una cédula o NIT en las formas en que se compara con la lista de propietarios: normalizada, sin un prefijo de letras
+ * ("CC 1.020.304", "NIT: 900…") y sin el dígito de verificación ("900.123.456-7"). [] si no hay dato.
  */
-export function destinoContrato(reglas: ReglasContratos, props: Propiedades, monto: number | null, r: Reparto): Destino {
-  const clave = normalizarCodigo(props[PROP_CLAVE_ASESOR]);
-  const cedula = normalizarCodigo(props[PROP_CEDULA_PROPIETARIO]);
+export function variantesDocumento(valor: unknown): string[] {
+  const texto = valor === null || valor === undefined ? "" : String(valor).trim();
+  const variantes = [normalizarCodigo(texto)];
+  const sinPrefijo = texto.replace(/^[A-Za-z][A-Za-z.\s]*?[\s.:]+(?=\d)/, "");
+  if (sinPrefijo !== texto) variantes.push(normalizarCodigo(sinPrefijo));
+  const sinDigito = /^([\d.\s]+)-\s*\d$/.exec(sinPrefijo);
+  if (sinDigito) variantes.push(normalizarCodigo(sinDigito[1]));
+  return unicos(variantes.filter(Boolean));
+}
+
+/**
+ * Lo que leen las reglas de un contrato: la clave del asesor (la del contrato o, si no la trae, la del Asesor asociado)
+ * y los documentos de los arrendadores asociados, más el del propietario en la orden si lo trae.
+ */
+export function datosContrato(props: Propiedades, asociados: { claves: string[]; documentos: string[] } = { claves: [], documentos: [] }): DatosContrato {
+  const clave = normalizarCodigo(props[PROP_CLAVE_ASESOR]) || asociados.claves.map(normalizarCodigo).find(Boolean) || "";
+  const cedulas = unicos([...asociados.documentos, props[PROP_CEDULA_PROPIETARIO] ?? ""].flatMap(variantesDocumento));
+  return { clave, cedulas };
+}
+
+/**
+ * Contratos, en este orden (reglas del 16-nov):
+ *   1. La clave del asesor tiene un solo ejecutivo en la tabla de Ana (incluidas las de Ana Tavera): ese ejecutivo.
+ *   2. Si no, alguno de los arrendadores tiene ejecutivo fijo (correo de Ana): ese ejecutivo.
+ *   3. Si no, la clave es compartida: reparto solo entre sus ejecutivos presentes.
+ *   4. Sin asesor o con una clave fuera de la tabla: reparto entre los ejecutivos de directos presentes.
+ *   5. Si el ejecutivo que corresponde no está (o ninguno de la clave compartida): reparto entre los de directos presentes.
+ * Si tampoco hay nadie de directos, el contrato espera en la cola (y a los 3 minutos, tarea a coordinación).
+ */
+export function destinoContrato(reglas: ReglasContratos, datos: DatosContrato, monto: number | null, r: Reparto): Destino {
+  const { clave } = datos;
   const deClave = clave ? (reglas.compartidas.get(clave) ?? reglas.asesores.get(clave)) : undefined;
+  const presentesDe = (grupo: string[]) => r.presentes.filter((a) => grupo.includes(a.clave));
 
+  const aDirectos = (motivo: string): Destino => {
+    const entre = presentesDe(reglas.directos);
+    if (!entre.length) return { clave: null, regla: `${motivo}; no hay ningún ejecutivo de directos presente`, decision: null };
+    return repartir(r, entre, monto, `${motivo}: reparto entre los ejecutivos de directos presentes`);
+  };
   const fijo = (ejecutivo: string, origen: string): Destino =>
-    estaPresente(r, ejecutivo)
-      ? { clave: ejecutivo, regla: origen, decision: null }
-      : repartir(r, r.competidores, monto, `${origen}, que no está: reparto entre los presentes`);
+    estaPresente(r, ejecutivo) ? { clave: ejecutivo, regla: origen, decision: null } : aDirectos(`${origen}, que no está`);
 
-  if (deClave?.length === 1) return fijo(deClave[0], `clave de asesor ${clave} → ${r.nombres(deClave[0])}`);
-  const dePropietario = cedula ? reglas.propietarios.get(cedula) : undefined;
-  if (dePropietario) return fijo(dePropietario, `propietario con ejecutivo fijo → ${r.nombres(dePropietario)}`);
-  if (deClave && deClave.length > 1) {
-    const entre = r.presentes.filter((a) => deClave.includes(a.clave));
-    if (entre.length) return repartir(r, entre, monto, `clave compartida ${clave}: reparto entre ${entre.map((a) => a.etiqueta).join(", ")}`);
-    return repartir(r, r.competidores, monto, `clave compartida ${clave}, sin ninguno de sus ejecutivos presente: reparto entre los presentes`);
+  if (deClave?.length === 1) return fijo(deClave[0], `clave de asesor ${clave} → ${r.nombres(deClave[0])} (ejecutivo único)`);
+  const cedula = datos.cedulas.find((c) => reglas.propietarios.has(c));
+  if (cedula) {
+    const ejecutivo = reglas.propietarios.get(cedula)!;
+    return fijo(ejecutivo, `propietario con ejecutivo fijo → ${r.nombres(ejecutivo)}`);
   }
-  return repartir(r, r.competidores, monto, clave ? `clave de asesor ${clave} sin ejecutivo en la tabla: reparto` : "sin clave de asesor: reparto");
+  if (deClave && deClave.length > 1) {
+    const entre = presentesDe(deClave);
+    if (entre.length) return repartir(r, entre, monto, `clave compartida ${clave}: reparto entre ${entre.map((a) => a.etiqueta).join(", ")}`);
+    return aDirectos(`clave compartida ${clave}, sin ninguno de sus ejecutivos presente`);
+  }
+  return aDirectos(clave ? `clave de asesor ${clave} sin ejecutivo en la tabla` : "contrato sin asesor");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -910,18 +999,23 @@ export function cargarParametros(flujo: Flujo, competidores: Persona[]): Paramet
 
 export function cargarCalendario(ruta: string = RUTA.ausencias): Calendario {
   if (!existsSync(ruta)) return { diasLaborales: [1, 2, 3, 4, 5], ausencias: [] };
-  const bruto = leerJSON<Partial<Calendario>>(ruta, "las ausencias (data/ausencias.json)");
+  return validarCalendario(leerJSON<Partial<Calendario>>(ruta, "las ausencias (data/ausencias.json)"));
+}
+
+export function validarCalendario(bruto: Partial<Calendario>): Calendario {
   const dias = bruto.diasLaborales ?? [1, 2, 3, 4, 5];
   if (!Array.isArray(dias) || dias.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) {
     throw new ErrorUso("data/ausencias.json: 'diasLaborales' debe ser una lista de números de 0 (domingo) a 6 (sábado).");
   }
   const formatoFecha = /^\d{4}-\d{2}-\d{2}$/;
-  const ausencias = (bruto.ausencias ?? []).map((a, i): Ausencia => {
+  const ausencias = ((bruto.ausencias ?? []) as (Omit<Ausencia, "hasta"> & { hasta: string | null })[]).map((a, i): Ausencia => {
     const donde = `data/ausencias.json, ausencias[${i}]`;
     if (!a.persona) throw new ErrorUso(`${donde}: falta 'persona' (su clave de la nómina, o "*" para todos).`);
-    if (!formatoFecha.test(a.desde ?? "") || !formatoFecha.test(a.hasta ?? "")) throw new ErrorUso(`${donde}: 'desde' y 'hasta' deben ser AAAA-MM-DD.`);
-    if (a.desde > a.hasta) throw new ErrorUso(`${donde}: 'desde' es posterior a 'hasta'.`);
-    return { persona: a.persona, desde: a.desde, hasta: a.hasta, motivo: a.motivo };
+    // "hasta": null es "hasta nuevo aviso" (p. ej. vacaciones sin fecha de regreso).
+    const hasta = a.hasta === null ? HASTA_NUEVO_AVISO : a.hasta;
+    if (!formatoFecha.test(a.desde ?? "") || !formatoFecha.test(hasta ?? "")) throw new ErrorUso(`${donde}: 'desde' y 'hasta' deben ser AAAA-MM-DD ('hasta' puede ser null: hasta nuevo aviso).`);
+    if (a.desde > hasta) throw new ErrorUso(`${donde}: 'desde' es posterior a 'hasta'.`);
+    return { persona: a.persona, desde: a.desde, hasta, motivo: a.motivo };
   });
   return { diasLaborales: dias, ausencias };
 }
@@ -930,11 +1024,12 @@ export function cargarCalendario(ruta: string = RUTA.ausencias): Calendario {
 
 export interface ReglasAnalisisJSON {
   directo?: { persona?: string; montoMayorA?: number; condiciones?: { propiedad?: string; valor?: string | boolean; motivo?: string }[] } | null;
-  suplente?: string | null;
 }
 export interface ReglasContratosJSON {
   clavesCompartidas?: Record<string, string[]>;
+  directos?: string[];
   tareaSinAsignar?: { minutos?: number; responsables?: string[] } | null;
+  tareaReasignacion?: { responsables?: string[] } | null;
 }
 export interface AsesoresJSON {
   fuente?: string;
@@ -965,8 +1060,7 @@ export function validarReglasAnalisis(bruto: ReglasAnalisisJSON, todos: Persona[
     });
     directo = { persona, montoMayorA: d.montoMayorA, condiciones };
   }
-  const suplente = bruto.suplente ? exigirPersona(todos, bruto.suplente, `${origen}, suplente`) : null;
-  return { tipo: "analisis_riesgo", directo, suplente };
+  return { tipo: "analisis_riesgo", directo };
 }
 
 export function validarReglasContratos(
@@ -988,31 +1082,41 @@ export function validarReglasContratos(
     tabla.set(normalizarCodigo(clave), listaDe(lista, `data/contratos/asesores.json, claves["${clave}"]`));
   }
   const fijos = new Map<string, string>();
+  const vistas = new Map<string, string>();
   for (const [i, p] of (propietarios?.propietarios ?? []).entries()) {
     const donde = `data/contratos/propietarios.json, propietarios[${i}]`;
-    const cedula = normalizarCodigo(p.cedula);
-    if (!cedula) throw new ErrorUso(`${donde}: falta 'cedula'.`);
+    const variantes = variantesDocumento(p.cedula);
+    if (!variantes.length) throw new ErrorUso(`${donde}: falta 'cedula'.`);
     const ejecutivo = exigirPersona(todos, p.ejecutivo, `${donde}, ejecutivo`);
-    if (fijos.has(cedula) && fijos.get(cedula) !== ejecutivo) throw new ErrorUso(`${donde}: esa cédula ya tiene otro ejecutivo fijo.`);
-    fijos.set(cedula, ejecutivo);
+    if (vistas.has(variantes[0]) && vistas.get(variantes[0]) !== ejecutivo) throw new ErrorUso(`${donde}: esa cédula ya tiene otro ejecutivo fijo.`);
+    vistas.set(variantes[0], ejecutivo);
+    for (const v of variantes) if (!fijos.has(v)) fijos.set(v, ejecutivo);
   }
+  const responsablesDe = (valor: unknown, donde: string): string[] => {
+    if (!Array.isArray(valor) || !valor.length || valor.some((x) => typeof x !== "string" || !x.trim())) {
+      throw new ErrorUso(`data/contratos/reglas.json: '${donde}' debe ser una lista de nombres (o ownerIds) de HubSpot.`);
+    }
+    return valor.map((x: string) => x.trim());
+  };
   let tarea: ReglasContratos["tarea"] = null;
   if (reglas.tareaSinAsignar) {
     const t = reglas.tareaSinAsignar;
     const minutos = t.minutos ?? 3;
     if (typeof minutos !== "number" || !(minutos > 0)) throw new ErrorUso("data/contratos/reglas.json: 'tareaSinAsignar.minutos' debe ser mayor que 0.");
-    if (!Array.isArray(t.responsables) || !t.responsables.length || t.responsables.some((x) => typeof x !== "string" || !x.trim())) {
-      throw new ErrorUso("data/contratos/reglas.json: 'tareaSinAsignar.responsables' debe ser una lista de nombres (o ownerIds) de HubSpot.");
-    }
-    tarea = { minutos, responsables: t.responsables.map((x) => x.trim()) };
+    tarea = { minutos, responsables: responsablesDe(t.responsables, "tareaSinAsignar.responsables") };
   }
+  const tareaReasignacion = reglas.tareaReasignacion ? { responsables: responsablesDe(reglas.tareaReasignacion.responsables, "tareaReasignacion.responsables") } : null;
   return {
     tipo: "contratos",
     asesores: tabla,
     tabla: { claves: tabla.size, fuente: asesores?.fuente ?? null, importado: asesores?.importado ?? null },
     compartidas,
     propietarios: fijos,
+    totalPropietarios: vistas.size,
+    // Sin 'directos' las reglas cargan (p. ej. al importar la tabla), pero el diagnóstico no deja arrancar.
+    directos: reglas.directos === undefined ? [] : listaDe(reglas.directos, "data/contratos/reglas.json, directos"),
     tarea,
+    tareaReasignacion,
   };
 }
 
@@ -1381,7 +1485,57 @@ function leerCola(ctx: Contexto): Promise<RegistroHS[]> {
   return buscarTodo(ctx.hs, ctx.cfg.objeto, { filterGroups: filtrosCola(ctx.flujo), properties: propiedadesCola(ctx.flujo, ctx.reglas) });
 }
 
-/** El monto de cada registro: de sus propiedades o, si el flujo lo dice, del primer objeto asociado (lecturas por lotes). */
+/** Un objeto asociado y los tipos de asociación con que lo está. */
+interface Asociado {
+  id: string;
+  tipos: number[];
+}
+
+/** Los asociados de tipo `a` de cada registro de tipo `de` (lecturas por lotes). */
+async function asociadosPorLotes(hs: ClienteHS, de: string, a: string, ids: string[]): Promise<Map<string, Asociado[]>> {
+  const salida = new Map<string, Asociado[]>();
+  for (const lote of enLotes(unicos(ids), 100)) {
+    const res = await hs.solicitar<{ results?: { from: { id: string | number }; to?: { toObjectId: string | number; associationTypes?: { typeId: number }[] }[] }[] }>(
+      "POST",
+      `/crm/associations/${API}/${de}/${a}/batch/read`,
+      { inputs: lote.map((id) => ({ id })) },
+    );
+    for (const x of res.results ?? []) {
+      salida.set(String(x.from.id), (x.to ?? []).map((t) => ({ id: String(t.toObjectId), tipos: (t.associationTypes ?? []).map((y) => y.typeId) })));
+    }
+  }
+  return salida;
+}
+
+/** Propiedades de varios objetos de un tipo (lecturas por lotes). */
+async function leerPorLotes(hs: ClienteHS, tipo: string, ids: string[], propiedades: string[]): Promise<Map<string, Propiedades>> {
+  const salida = new Map<string, Propiedades>();
+  for (const lote of enLotes(unicos(ids), 100)) {
+    const res = await hs.solicitar<{ results?: RegistroHS[] }>("POST", `/crm/objects/${API}/${tipo}/batch/read`, { properties: propiedades, inputs: lote.map((id) => ({ id })) });
+    for (const x of res.results ?? []) salida.set(String(x.id), x.properties);
+  }
+  return salida;
+}
+
+/**
+ * El monto entre los objetos asociados a un registro: el del más reciente de la pipeline del flujo que tenga dato (la
+ * Radicación); si ninguno de esa pipeline lo tiene, el del más reciente de cualquiera. null si nadie tiene dato.
+ */
+export function elegirMonto(objetos: { id: string; props: Propiedades }[], monto: Monto): number | null {
+  const recientes = [...objetos].sort((x, y) => Number(y.id) - Number(x.id)); // en HubSpot, un id mayor es un objeto más nuevo
+  const preferidos = monto.pipeline ? recientes.filter((o) => o.props.pipeline === monto.pipeline!.id) : [];
+  for (const o of [...preferidos, ...recientes]) {
+    const m = monto.calcular(o.props);
+    if (m !== null) return m;
+  }
+  return null;
+}
+
+/**
+ * El monto de cada registro: de sus propiedades o, si el flujo lo dice, de sus objetos asociados. Con `pipeline`, si el
+ * registro no tiene asociado un objeto de esa pipeline, se busca un nivel más: el Análisis está asociado a la Solicitud
+ * y el canon está en la Radicación asociada a esa Solicitud.
+ */
 async function montosDe(ctx: Pick<Contexto, "hs" | "cfg" | "flujo">, registros: RegistroHS[]): Promise<Map<string, number | null>> {
   const { monto } = ctx.flujo;
   const salida = new Map<string, number | null>();
@@ -1389,26 +1543,59 @@ async function montosDe(ctx: Pick<Contexto, "hs" | "cfg" | "flujo">, registros: 
     for (const r of registros) salida.set(r.id, monto.calcular(r.properties));
     return salida;
   }
-  const asociadoDe = new Map<string, string>();
-  for (const lote of enLotes(registros.map((r) => r.id), 100)) {
-    const res = await ctx.hs.solicitar<{ results?: { from: { id: string | number }; to?: { toObjectId: string | number }[] }[] }>(
-      "POST",
-      `/crm/associations/${API}/${ctx.cfg.objeto}/${monto.asociado}/batch/read`,
-      { inputs: lote.map((id) => ({ id })) },
-    );
-    for (const x of res.results ?? []) if (x.to?.length) asociadoDe.set(String(x.from.id), String(x.to[0].toObjectId));
-  }
-  const props = new Map<string, Propiedades>();
-  for (const lote of enLotes(unicos([...asociadoDe.values()]), 100)) {
-    const res = await ctx.hs.solicitar<{ results?: RegistroHS[] }>("POST", `/crm/objects/${API}/${monto.asociado}/batch/read`, {
-      properties: monto.propiedades,
-      inputs: lote.map((id) => ({ id })),
+  const tipo = monto.asociado;
+  const propiedades = unicos([...monto.propiedades, ...(monto.pipeline ? ["pipeline"] : [])]);
+  const directos = await asociadosPorLotes(ctx.hs, ctx.cfg.objeto, tipo, registros.map((r) => r.id));
+  const datos = await leerPorLotes(ctx.hs, tipo, [...directos.values()].flat().map((a) => a.id), propiedades);
+
+  let segundo = new Map<string, Asociado[]>();
+  if (monto.pipeline) {
+    const pipeline = monto.pipeline.id;
+    const intermedios = registros.flatMap((r) => {
+      const suyos = directos.get(r.id) ?? [];
+      return suyos.some((a) => datos.get(a.id)?.pipeline === pipeline) ? [] : suyos.map((a) => a.id);
     });
-    for (const x of res.results ?? []) props.set(String(x.id), x.properties);
+    if (intermedios.length) {
+      segundo = await asociadosPorLotes(ctx.hs, tipo, tipo, intermedios);
+      const nuevos = [...segundo.values()].flat().map((a) => a.id).filter((id) => !datos.has(id));
+      for (const [id, p] of await leerPorLotes(ctx.hs, tipo, nuevos, propiedades)) datos.set(id, p);
+    }
   }
   for (const r of registros) {
-    const a = asociadoDe.get(r.id);
-    salida.set(r.id, a && props.has(a) ? monto.calcular(props.get(a)!) : null);
+    const primeros = (directos.get(r.id) ?? []).map((a) => a.id);
+    const ids = unicos([...primeros, ...primeros.flatMap((id) => (segundo.get(id) ?? []).map((a) => a.id))]);
+    salida.set(r.id, elegirMonto(ids.flatMap((id) => (datos.has(id) ? [{ id, props: datos.get(id)! }] : [])), monto));
+  }
+  return salida;
+}
+
+/** El primer documento con dato de un contacto (en el orden de PROPS_DOCUMENTO_CONTACTO). */
+const documentoDe = (p: Propiedades | undefined): string => PROPS_DOCUMENTO_CONTACTO.map((n) => String(p?.[n] ?? "").trim()).find(Boolean) ?? "";
+
+/**
+ * Contratos: de cada contrato, las claves de sus Asesores asociados (solo de los que no traen la clave en la propiedad)
+ * y los documentos de sus contactos "Arrendador Cto" (lecturas por lotes).
+ */
+async function asociadosDeContratos(ctx: Pick<Contexto, "hs" | "cfg">, registros: RegistroHS[]): Promise<Map<string, { claves: string[]; documentos: string[] }>> {
+  const salida = new Map(registros.map((r) => [r.id, { claves: [] as string[], documentos: [] as string[] }]));
+  const { asesor, arrendador, objeto } = ctx.cfg;
+  if (asesor) {
+    const sinClave = registros.filter((r) => !normalizarCodigo(r.properties[PROP_CLAVE_ASESOR])).map((r) => r.id);
+    const asoc = await asociadosPorLotes(ctx.hs, objeto, asesor.objeto, sinClave);
+    const datos = await leerPorLotes(ctx.hs, asesor.objeto, [...asoc.values()].flat().map((a) => a.id), [asesor.propiedad]);
+    for (const [id, lista] of asoc) {
+      const s = salida.get(id);
+      if (s) s.claves = lista.map((a) => String(datos.get(a.id)?.[asesor.propiedad] ?? "")).filter(Boolean);
+    }
+  }
+  if (arrendador) {
+    const asoc = await asociadosPorLotes(ctx.hs, objeto, "0-1", registros.map((r) => r.id));
+    const contactos = new Map([...asoc].map(([id, lista]) => [id, lista.filter((a) => a.tipos.includes(arrendador.typeId)).map((a) => a.id)]));
+    const datos = await leerPorLotes(ctx.hs, "0-1", [...contactos.values()].flat(), PROPS_DOCUMENTO_CONTACTO);
+    for (const [id, lista] of contactos) {
+      const s = salida.get(id);
+      if (s) s.documentos = lista.map((c) => documentoDe(datos.get(c))).filter(Boolean);
+    }
   }
   return salida;
 }
@@ -1525,6 +1712,22 @@ interface PropietarioHS {
   email?: string;
   firstName?: string;
   lastName?: string;
+  /** null en los propietarios de usuarios desactivados (HubSpot los sigue listando). */
+  userId?: number | null;
+}
+
+/**
+ * De los propietarios que coinciden con un nombre, si son varios: los activos (con usuario) y, si siguen siendo varios,
+ * los de nombre idéntico. En producción hay usuarios desactivados con nombres cortos ("Laura Calceto", "Andrea Torres",
+ * "Andrea Castellanos") que coinciden con el de la persona activa.
+ */
+export function desempatarPropietarios<T extends { firstName?: string; lastName?: string; userId?: number | null }>(hallados: T[], nombre: string): T[] {
+  if (hallados.length <= 1) return hallados;
+  const activos = hallados.filter((o) => o.userId);
+  const lista = activos.length ? activos : hallados;
+  if (lista.length <= 1) return lista;
+  const exactos = lista.filter((o) => normalizar(`${o.firstName ?? ""} ${o.lastName ?? ""}`) === normalizar(nombre));
+  return exactos.length ? exactos : lista;
 }
 interface Paso {
   estado: "ok" | "aviso" | "error";
@@ -1582,16 +1785,16 @@ export async function diagnosticar(
   const etiqueta = (clave: string) => pool.find((a) => a.clave === clave)?.etiqueta ?? clave;
 
   // Datos locales
-  const competidores = competidoresDe(pool);
-  const soloRegla = pool.filter((a) => !a.reparto);
-  nota(
-    "ok",
-    `Nómina: ${competidores.length} ${flujo.personas} en el reparto (${competidores.map((a) => a.etiqueta).join(", ")})` +
-      (soloRegla.length ? `; reciben solo por regla: ${soloRegla.map((a) => a.etiqueta).join(", ")}` : ""),
-  );
+  nota("ok", `Nómina: ${resumenEquipo(pool, reglas, flujo.personas)}`);
   const edad = Math.floor((Date.now() - Date.parse(`${params.calibradoCon.hasta}T00:00:00-05:00`)) / 86_400_000);
   if (edad > EDAD_MAX_PARAMETROS_DIAS) {
-    nota("aviso", `Los parámetros se calibraron con datos hasta el ${params.calibradoCon.hasta} (hace ${edad} días). Hay que recalcularlos con --parametros antes de activar.`);
+    nota(
+      "aviso",
+      `Los parámetros se calibraron con datos hasta el ${params.calibradoCon.hasta} (hace ${edad} días). ` +
+        (flujo.conTecho
+          ? "Hay que recalcularlos con --parametros antes de activar."
+          : `Sin techo solo se usa el monto típico (${cop(params.canonTipico)}): conviene recalcularlo con --parametros cuando AGSSA tenga datos recientes.`),
+    );
   } else {
     nota("ok", `Parámetros calibrados con ${params.calibradoCon.desde} → ${params.calibradoCon.hasta} (${params.calibradoCon.casos} casos)`);
   }
@@ -1604,23 +1807,30 @@ export async function diagnosticar(
       const activa = pool.some((a) => a.clave === d.persona);
       nota(
         activa ? "ok" : "error",
-        `Directo a ${etiqueta(d.persona)}: monto mayor que ${cop(d.montoMayorA)}${d.condiciones.map((c) => ` o ${c.motivo} (${c.propiedad} = ${c.valor})`).join("")}` +
+        `Directo a ${etiqueta(d.persona)}, aunque esté ausente: monto mayor que ${cop(d.montoMayorA)}${d.condiciones.map((c) => ` o ${c.motivo} (${c.propiedad} = ${c.valor})`).join("")}` +
           (activa ? "" : `. ${d.persona} no está activa en ${origenNomina}: esos registros esperarían siempre.`),
       );
-      if (reglas.suplente) nota(pool.some((a) => a.clave === reglas.suplente) ? "ok" : "aviso", `Si ${etiqueta(d.persona)} no está, lo directo va a ${etiqueta(reglas.suplente)}`);
-      else nota("aviso", `Si ${etiqueta(d.persona)} no está, lo directo espera en la cola: no hay suplente en data/${flujo.clave}/reglas.json.`);
     }
   } else {
     if (reglas.tabla.claves) nota("ok", `Tabla de asesores: ${reglas.tabla.claves} claves (${reglas.tabla.fuente ?? "sin fuente"}, importada el ${reglas.tabla.importado?.slice(0, 10) ?? "?"})`);
     else {
       nota(
         "aviso",
-        "No hay tabla de asesores (data/contratos/asesores.json): solo deciden las claves compartidas y lo demás se reparte entre todos. " +
+        "No hay tabla de asesores (data/contratos/asesores.json): solo deciden las claves compartidas y lo demás va a los ejecutivos de directos. " +
           "Se importa el Excel de Ana con: node asignacion_equilibrada.ts --importar-asesores <archivo.xlsx>",
       );
     }
     nota("ok", `Claves compartidas: ${[...reglas.compartidas].map(([k, v]) => `${k} (${v.map(etiqueta).join(", ")})`).join("; ") || "ninguna"}`);
-    if (reglas.propietarios.size) nota("ok", `Propietarios con ejecutivo fijo: ${reglas.propietarios.size}`);
+    const inactivos = reglas.directos.filter((k) => !pool.some((a) => a.clave === k));
+    if (!reglas.directos.length) nota("error", "Falta 'directos' en data/contratos/reglas.json: los ejecutivos que reciben lo que no tiene ejecutivo por regla.");
+    else {
+      nota(
+        inactivos.length === reglas.directos.length ? "error" : inactivos.length ? "aviso" : "ok",
+        `Ejecutivos de directos (sin asesor, clave fuera de la tabla o ejecutivo ausente): ${reglas.directos.map(etiqueta).join(", ")}` +
+          (inactivos.length ? `. No están activos en ${origenNomina}: ${inactivos.join(", ")}` : ""),
+      );
+    }
+    if (reglas.totalPropietarios) nota("ok", `Propietarios con ejecutivo fijo: ${reglas.totalPropietarios}`);
     else nota("aviso", "No hay propietarios con ejecutivo fijo (data/contratos/propietarios.json): falta copiar la lista del correo de Ana.");
   }
 
@@ -1715,27 +1925,74 @@ export async function diagnosticar(
       nota("error", `No se pudieron leer las propiedades del objeto: ${mensajeDe(error)}`);
     }
   }
-  if (flujo.monto.asociado) {
+  const m = flujo.monto;
+  if (m.asociado) {
     try {
-      const { results } = await hs.solicitar<{ results: PropiedadHS[] }>("GET", `/crm/properties/${API}/${flujo.monto.asociado}`);
+      const { results } = await hs.solicitar<{ results: PropiedadHS[] }>("GET", `/crm/properties/${API}/${m.asociado}`);
       const nombres = new Set(results.map((p) => p.name));
-      const faltan = flujo.monto.propiedades.filter((n) => !nombres.has(n));
-      if (faltan.length) nota("error", `El objeto asociado ${flujo.monto.asociado} no tiene ${faltan.join(", ")} (el ${flujo.monto.descripcion}).`);
-      else nota("ok", `Monto (${flujo.monto.descripcion}): del objeto asociado ${flujo.monto.asociado}, propiedades ${flujo.monto.propiedades.join(", ")}`);
+      const faltan = m.propiedades.filter((n) => !nombres.has(n));
+      if (faltan.length) nota("error", `El objeto asociado ${m.asociado} no tiene ${faltan.join(", ")} (el ${m.descripcion}).`);
+      else {
+        let donde = `del objeto asociado ${m.asociado}`;
+        if (m.pipeline) {
+          const { results: pipelines } = await hs.solicitar<{ results: PipelineHS[] }>("GET", `/crm/pipelines/${API}/${m.asociado}`);
+          const p = pipelines.find((x) => x.id === m.pipeline!.id);
+          if (!p) nota("aviso", `Los objetos ${m.asociado} no tienen la pipeline ${m.pipeline.nombre} (${m.pipeline.id}): el monto saldrá del asociado que tenga dato.`);
+          donde = `de la ${p?.label ?? m.pipeline.nombre} (${m.asociado}, pipeline ${m.pipeline.id}) asociada al registro o a su Solicitud`;
+        }
+        nota("ok", `Monto (${m.descripcion}): ${donde}, propiedades ${m.propiedades.join(", ")}`);
+      }
     } catch (error) {
-      nota("error", `No se pudieron leer las propiedades del objeto asociado ${flujo.monto.asociado} (scope crm.objects.deals.read): ${mensajeDe(error)}`);
+      nota("error", `No se pudieron leer las propiedades o pipelines del objeto asociado ${m.asociado} (scope crm.objects.deals.read): ${mensajeDe(error)}`);
     }
   } else {
-    nota("ok", `Monto (${flujo.monto.descripcion}): ${flujo.monto.propiedades.join(", ")}`);
+    nota("ok", `Monto (${m.descripcion}): ${m.propiedades.join(", ")}`);
+  }
+
+  // Contratos: el Asesor asociado (clave) y los contactos "Arrendador Cto" (cédulas)
+  let asesor: ConfigHS["asesor"] = null;
+  let arrendador: ConfigHS["arrendador"] = null;
+  if (reglas.tipo === "contratos" && objeto) {
+    try {
+      const { results } = await hs.solicitar<{ results: SchemaHS[] }>("GET", `/crm-object-schemas/${API}/schemas`);
+      const s = results.find((x) => [x.labels?.singular, x.labels?.plural, x.name].some((t) => t && ASESOR.nombres.includes(normalizar(t))));
+      if (!s) nota("aviso", `No hay un objeto "Asesores": la clave del asesor sale solo de ${PROP_CLAVE_ASESOR}.`);
+      else {
+        const { results: props } = await hs.solicitar<{ results: PropiedadHS[] }>("GET", `/crm/properties/${API}/${s.objectTypeId}`);
+        if (!props.some((p) => p.name === ASESOR.propiedad)) nota("aviso", `El objeto Asesores (${s.objectTypeId}) no tiene ${ASESOR.propiedad}: la clave sale solo de ${PROP_CLAVE_ASESOR}.`);
+        else {
+          asesor = { objeto: s.objectTypeId, propiedad: ASESOR.propiedad };
+          nota("ok", `Clave del asesor: ${PROP_CLAVE_ASESOR} o, si no la trae, ${ASESOR.propiedad} del Asesor asociado (${s.objectTypeId})`);
+        }
+      }
+    } catch (error) {
+      nota("error", `No se pudo leer el objeto Asesores (scope crm.schemas.custom.read): ${mensajeDe(error)}`);
+    }
+    try {
+      const { results } = await hs.solicitar<{ results: { typeId: number; label: string | null }[] }>("GET", `/crm/associations/${API}/${objeto}/0-1/labels`);
+      const tipo = results.find((x) => x.label && normalizar(x.label) === normalizar(ETIQUETA_ARRENDADOR));
+      const { results: props } = await hs.solicitar<{ results: PropiedadHS[] }>("GET", `/crm/properties/${API}/0-1`);
+      const conDocumento = PROPS_DOCUMENTO_CONTACTO.filter((n) => props.some((p) => p.name === n));
+      if (!tipo) nota("aviso", `Los contratos no tienen la etiqueta de contacto "${ETIQUETA_ARRENDADOR}": la cédula del propietario sale solo de ${PROP_CEDULA_PROPIETARIO}.`);
+      else if (!conDocumento.length) nota("aviso", `Los contactos no tienen ${PROPS_DOCUMENTO_CONTACTO.join(", ")}: la cédula del propietario sale solo de ${PROP_CEDULA_PROPIETARIO}.`);
+      else {
+        arrendador = { typeId: tipo.typeId };
+        nota("ok", `Cédulas de los propietarios: contactos "${ETIQUETA_ARRENDADOR}" (tipo ${tipo.typeId}), ${conDocumento.join(" o ")}; y ${PROP_CEDULA_PROPIETARIO}`);
+      }
+    } catch (error) {
+      nota("error", `No se pudieron leer los contactos asociados a los contratos (scopes crm.objects.contacts.read y crm.schemas.contacts.read): ${mensajeDe(error)}`);
+    }
   }
 
   // Propietarios ↔ nómina
   const claveDeOwner = new Map<string, string>();
   const ownerDeClave = new Map<string, string>();
+  const nombreDeOwner = new Map<string, string>();
   let propietarios: PropietarioHS[] = [];
   const nombreDe = (o: PropietarioHS) => `${o.firstName ?? ""} ${o.lastName ?? ""}`.trim() || o.email || o.id;
   try {
     propietarios = await listarPropietarios(hs);
+    for (const o of propietarios) nombreDeOwner.set(o.id, nombreDe(o));
     for (const a of pool) {
       let hallados: PropietarioHS[];
       let criterio: string;
@@ -1746,7 +2003,7 @@ export async function diagnosticar(
         hallados = propietarios.filter((o) => o.email?.toLowerCase() === a.correo?.toLowerCase());
         criterio = `correo ${a.correo}`;
       } else {
-        hallados = propietarios.filter((o) => coincideNombre(a.nombre, `${o.firstName ?? ""} ${o.lastName ?? ""}`));
+        hallados = desempatarPropietarios(propietarios.filter((o) => coincideNombre(a.nombre, `${o.firstName ?? ""} ${o.lastName ?? ""}`)), a.nombre);
         criterio = `nombre "${a.nombre}"`;
       }
       if (hallados.length === 1) {
@@ -1774,22 +2031,37 @@ export async function diagnosticar(
     }
   }
 
-  // Tarea a coordinación si un registro no se asigna a tiempo
+  // Tareas a coordinación: si un registro no se asigna a tiempo y si un contrato traía otro ejecutivo
   let tarea: ConfigHS["tarea"] = null;
-  if (reglas.tipo === "contratos" && reglas.tarea && objeto && propietarios.length) {
-    const owners: { nombre: string; id: string }[] = [];
-    for (const r of reglas.tarea.responsables) {
-      const hallados = /^\d+$/.test(r) ? propietarios.filter((o) => o.id === r) : propietarios.filter((o) => coincideNombre(r, `${o.firstName ?? ""} ${o.lastName ?? ""}`));
-      if (hallados.length === 1) owners.push({ nombre: nombreDe(hallados[0]), id: hallados[0].id });
-      else nota("error", `Responsable de la tarea "${r}" (data/${flujo.clave}/reglas.json): ${hallados.length ? "varios propietarios coinciden" : "no se encontró en HubSpot"}; hay que escribir su ownerId.`);
-    }
+  let tareaReasignacion: ConfigHS["tareaReasignacion"] = null;
+  if (reglas.tipo === "contratos" && (reglas.tarea || reglas.tareaReasignacion) && objeto && propietarios.length) {
+    const resolver = (responsables: string[], cual: string): TareaHS["owners"] | null => {
+      const owners: TareaHS["owners"] = [];
+      for (const r of responsables) {
+        const hallados = /^\d+$/.test(r)
+          ? propietarios.filter((o) => o.id === r)
+          : desempatarPropietarios(propietarios.filter((o) => coincideNombre(r, `${o.firstName ?? ""} ${o.lastName ?? ""}`)), r);
+        if (hallados.length === 1) owners.push({ nombre: nombreDe(hallados[0]), id: hallados[0].id });
+        else nota("error", `Responsable de ${cual} "${r}" (data/${flujo.clave}/reglas.json): ${hallados.length ? "varios propietarios coinciden" : "no se encontró en HubSpot"}; hay que escribir su ownerId.`);
+      }
+      return owners.length === responsables.length ? owners : null;
+    };
     try {
       const { results } = await hs.solicitar<{ results: { category: string; typeId: number; label: string | null }[] }>("GET", `/crm/associations/${API}/tasks/${objeto}/labels`);
       const tipo = results.find((x) => !x.label) ?? results[0];
       if (!tipo) nota("error", "Las tareas no se pueden asociar a este objeto (no hay un tipo de asociación tareas → objeto).");
-      else if (owners.length === reglas.tarea.responsables.length) {
-        tarea = { owners, asociacion: { associationCategory: tipo.category, associationTypeId: tipo.typeId } };
-        nota("ok", `Si un registro no se asigna en ${reglas.tarea.minutos} min, tarea para ${owners.map((o) => o.nombre).join(" y ")}`);
+      else {
+        const asociacion = { associationCategory: tipo.category, associationTypeId: tipo.typeId };
+        const sinAsignar = reglas.tarea ? resolver(reglas.tarea.responsables, "la tarea por no asignar a tiempo") : null;
+        if (reglas.tarea && sinAsignar) {
+          tarea = { owners: sinAsignar, asociacion };
+          nota("ok", `Si un registro no se asigna en ${reglas.tarea.minutos} min, tarea para ${sinAsignar.map((o) => o.nombre).join(" y ")}`);
+        }
+        const porReasignacion = reglas.tareaReasignacion ? resolver(reglas.tareaReasignacion.responsables, "la tarea por reasignación") : null;
+        if (porReasignacion) {
+          tareaReasignacion = { owners: porReasignacion, asociacion };
+          nota("ok", `Si un contrato traía otro ejecutivo, tarea para ${porReasignacion.map((o) => o.nombre).join(" y ")} con el anterior y el nuevo`);
+        }
       }
     } catch (error) {
       nota("error", `No se pudo leer cómo se asocian las tareas al objeto: ${mensajeDe(error)}`);
@@ -1808,11 +2080,27 @@ export async function diagnosticar(
       const primero = prueba.results?.[0];
       if (primero && flujo.monto.asociado) {
         const montos = await montosDe({ hs, flujo, cfg: { objeto } as ConfigHS }, [primero]);
-        const m = montos.get(primero.id) ?? null;
-        nota(m === null ? "aviso" : "ok", `Monto del primer registro de la cola (#${primero.id}): ${m === null ? "sin dato (cuenta como un caso típico y no puede ir directo por monto)" : cop(m)}`);
+        const valor = montos.get(primero.id) ?? null;
+        nota(valor === null ? "aviso" : "ok", `Monto del primer registro de la cola (#${primero.id}): ${valor === null ? "sin dato (cuenta como un caso típico y no puede ir directo por monto)" : cop(valor)}`);
+      }
+      // Contratos: la misma lectura de asociados que hace cada ciclo, con el primero de la cola o, si está vacía, el más reciente.
+      if (reglas.tipo === "contratos" && (asesor || arrendador)) {
+        const muestra =
+          primero ??
+          (await hs.solicitar<{ results?: RegistroHS[] }>("POST", `/crm/objects/${API}/${objeto}/search`, {
+            filterGroups: [{ filters: [{ propertyName: "hs_pipeline", operator: "EQ", value: flujo.pipeline }] }],
+            properties: propiedadesCola(flujo, reglas),
+            sorts: [{ propertyName: "hs_object_id", direction: "DESCENDING" }],
+            limit: 1,
+          })).results?.[0];
+        if (muestra) {
+          const a = (await asociadosDeContratos({ hs, cfg: { objeto, asesor, arrendador } as ConfigHS }, [muestra])).get(muestra.id)!;
+          const datos = datosContrato(muestra.properties, a);
+          nota("ok", `Lectura de asociados del contrato #${muestra.id}: clave del asesor ${datos.clave || "sin dato"}; ${a.documentos.length} arrendador(es) con documento`);
+        }
       }
     } catch (error) {
-      nota("error", `No se pudo leer la cola (scopes crm.objects.custom.read y crm.objects.deals.read): ${mensajeDe(error)}`);
+      nota("error", `No se pudo leer la cola o sus asociados (scopes crm.objects.custom.read, crm.objects.deals.read y crm.objects.contacts.read): ${mensajeDe(error)}`);
     }
     if (fechaOk) {
       try {
@@ -1836,8 +2124,12 @@ export async function diagnosticar(
       etapasAbiertas,
       claveDeOwner,
       ownerDeClave,
+      nombreDeOwner,
       opcionesAnterior,
       tarea,
+      tareaReasignacion,
+      asesor,
+      arrendador,
     },
     pasos,
   };
@@ -1848,12 +2140,13 @@ export async function diagnosticar(
 // ═════════════════════════════════════════════════════════════════════════════
 
 /** El texto que queda en asignacion_detalle: por qué se eligió a esa persona. */
-function textoDetalle(flujo: Flujo, destino: Destino, monto: number | null, r: Reparto, instante: number): string {
+function textoDetalle(flujo: Flujo, destino: Destino, monto: number | null, r: Reparto, instante: number, antes: string | null = null): string {
   const partes = [
     `Motor ${VERSION_MOTOR}`,
     `${horaLocal(instante)} hora Colombia`,
     monto === null ? `${flujo.monto.descripcion}: sin dato, se usó el típico` : `${flujo.monto.descripcion} ${cop(monto)}`,
     `regla: ${destino.regla}`,
+    ...(antes ? [`reasignación: antes lo tenía ${antes}`] : []),
   ];
   const d = destino.decision;
   if (d) {
@@ -1887,6 +2180,28 @@ interface SinAsignar {
   motivo: string;
 }
 
+/** Crea una tarea en HubSpot para un propietario, asociada al registro. Devuelve "ok" o el error (y lo alerta). */
+async function crearTarea(ctx: Contexto, tarea: TareaHS, owner: TareaHS["owners"][number], id: string, asunto: string, cuerpo: string, prioridad: "HIGH" | "MEDIUM"): Promise<string> {
+  try {
+    await ctx.hs.solicitar("POST", `/crm/objects/${API}/tasks`, {
+      properties: {
+        hs_timestamp: new Date().toISOString(),
+        hs_task_subject: asunto,
+        hs_task_body: cuerpo,
+        hs_task_status: "NOT_STARTED",
+        hs_task_priority: prioridad,
+        hs_task_type: "TODO",
+        hubspot_owner_id: owner.id,
+      },
+      associations: [{ to: { id }, types: [tarea.asociacion] }],
+    });
+    return "ok";
+  } catch (error) {
+    alerta(ctx.flujo, "tarea_fallida", `No se pudo crear la tarea de ${owner.nombre} para el registro ${id}: ${mensajeDe(error)}`, { id });
+    return `error: ${mensajeDe(error)}`;
+  }
+}
+
 /**
  * Lo que ninguna regla pudo asignar. Con tarea en las reglas (contratos): cuando lleva más de N minutos en la etapa, una
  * tarea para cada responsable, una sola vez por registro. Sin tarea: una línea "en_espera" por registro y por día
@@ -1916,27 +2231,18 @@ async function avisarSinAsignar(ctx: Contexto, lista: SinAsignar[], ahora: numbe
     if (entro === null || ahora - entro < minutos * 60_000) continue;
     for (const owner of cfg.tarea.owners) {
       if (hechas.has(`${registro.id}|${owner.id}`)) continue;
-      let escritura = ESCRITURA_SOMBRA;
-      if (ctx.modo === "activo") {
-        try {
-          await ctx.hs.solicitar("POST", `/crm/objects/${API}/tasks`, {
-            properties: {
-              hs_timestamp: new Date(ahora).toISOString(),
-              hs_task_subject: `${flujo.nombre}: registro ${registro.id} sin ${flujo.persona}`,
-              hs_task_body: `El algoritmo de asignación no pudo asignar este registro en ${minutos} minutos (${motivo}). Sigue en la etapa de asignación: hay que asignarlo a mano.`,
-              hs_task_status: "NOT_STARTED",
-              hs_task_priority: "HIGH",
-              hs_task_type: "TODO",
-              hubspot_owner_id: owner.id,
-            },
-            associations: [{ to: { id: registro.id }, types: [cfg.tarea.asociacion] }],
-          });
-          escritura = "ok";
-        } catch (error) {
-          escritura = `error: ${mensajeDe(error)}`;
-          alerta(flujo, "tarea_fallida", `No se pudo crear la tarea de ${owner.nombre} para el registro ${registro.id}: ${mensajeDe(error)}`, { id: registro.id });
-        }
-      }
+      const escritura =
+        ctx.modo === "activo"
+          ? await crearTarea(
+              ctx,
+              cfg.tarea,
+              owner,
+              registro.id,
+              `${flujo.nombre}: registro ${registro.id} sin ${flujo.persona}`,
+              `El algoritmo de asignación no pudo asignar este registro en ${minutos} minutos (${motivo}). Sigue en la etapa de asignación: hay que asignarlo a mano.`,
+              "HIGH",
+            )
+          : ESCRITURA_SOMBRA;
       registrar({ tipo: "tarea", ...comun, id: registro.id, ownerId: owner.id, responsable: owner.nombre, motivo, escritura });
       console.log(`  ${flujo.nombre} #${registro.id} sin asignar hace ${minutos} min o más (${motivo}): tarea para ${owner.nombre} [${escritura}]`);
     }
@@ -1975,11 +2281,8 @@ export async function ejecutarCiclo(ctx: Contexto, ahora: number = Date.now()): 
   }
 
   const presentes = presentesEn(hoy, ctx.pool, cal, ctx.ignorarHorario);
-  if (!presentes.length) {
-    alerta(flujo, "nadie_presente", `Hay ${pendientes.length} registro(s) en la cola y nadie presente hoy; quedan esperando.`);
-    await avisarSinAsignar(ctx, pendientes.map((registro) => ({ registro, motivo: "nadie presente" })), ahora, desdeMs);
-    return { ...resumen, enEspera: pendientes.length, omitido: "nadie presente" };
-  }
+  // Sin nadie presente igual se revisa la cola: una regla puede mandarle a alguien aunque esté ausente (Mónica).
+  if (!presentes.length) alerta(flujo, "nadie_presente", `Hay ${pendientes.length} registro(s) en la cola y nadie presente hoy; solo se asigna lo que va directo.`);
   if (ctx.modo === "activo" && cola.length > MAX_COLA_ACTIVA) {
     alerta(flujo, "cola_inusual", `La cola tiene ${cola.length} registros (más de ${MAX_COLA_ACTIVA}); no se escribe nada hasta que alguien la revise.`);
     await avisarSinAsignar(ctx, pendientes.map((registro) => ({ registro, motivo: "cola inusualmente grande" })), ahora, desdeMs);
@@ -1987,6 +2290,7 @@ export async function ejecutarCiclo(ctx: Contexto, ahora: number = Date.now()): 
   }
 
   const montos = await montosDe(ctx, pendientes);
+  const asociados = ctx.reglas.tipo === "contratos" ? await asociadosDeContratos(ctx, pendientes) : null;
   const opciones: OpcionesReparto = { techo: flujo.conTecho };
   let estado: Estado;
   if (flujo.carga === "abiertos") {
@@ -1998,6 +2302,7 @@ export async function ejecutarCiclo(ctx: Contexto, ahora: number = Date.now()): 
     estado = reconstruirEstado(await leerHistorial(ctx, ahora, desdeMs), hoy, competidoresDe(ctx.pool), cal, params);
   }
   const reparto: Reparto = {
+    activos: ctx.pool,
     presentes,
     competidores: competidoresDe(presentes),
     estado,
@@ -2038,7 +2343,10 @@ export async function ejecutarCiclo(ctx: Contexto, ahora: number = Date.now()): 
     }
     const props = actual?.properties ?? registro.properties;
 
-    const destino = ctx.reglas.tipo === "contratos" ? destinoContrato(ctx.reglas, props, monto, reparto) : destinoAnalisis(ctx.reglas, props, monto, reparto);
+    const destino =
+      ctx.reglas.tipo === "contratos"
+        ? destinoContrato(ctx.reglas, datosContrato(props, asociados?.get(registro.id)), monto, reparto)
+        : destinoAnalisis(ctx.reglas, props, monto, reparto);
     if (destino.clave === null) {
       sinAsignar.push({ registro, motivo: destino.regla });
       resumen.enEspera++;
@@ -2057,16 +2365,19 @@ export async function ejecutarCiclo(ctx: Contexto, ahora: number = Date.now()): 
       hs_pipeline_stage: cfg.etapaDestino,
       [flujo.propFecha]: new Date(instante).toISOString(),
     };
-    // Reasignación (contratos): el registro ya era de otro ejecutivo. La primera asignación no cuenta.
-    let reasignacion: { de: string; anteriorAnotado: boolean } | null = null;
+    // Reasignación (contratos): el registro ya tenía otro propietario, sea o no de la nómina. La primera asignación no
+    // cuenta. El ejecutivo anterior solo se anota si es una de las opciones de esa propiedad.
+    let reasignacion: { de: string | null; deOwner: string; deNombre: string; anteriorAnotado: boolean } | null = null;
     const previo = props.hubspot_owner_id ?? "";
     const r = flujo.reasignacion;
-    if (r && previo && previo !== ownerId && cfg.claveDeOwner.has(previo)) {
+    if (r && previo && previo !== ownerId) {
       escrito[r.contador] = String((Number(props[r.contador]) || 0) + 1);
       escrito[r.fecha] = escrito[flujo.propFecha];
       const anotado = cfg.opcionesAnterior?.has(previo) ?? false;
       if (anotado) escrito[r.anterior] = previo;
-      reasignacion = { de: cfg.claveDeOwner.get(previo)!, anteriorAnotado: anotado };
+      const de = cfg.claveDeOwner.get(previo) ?? null;
+      const deNombre = de ? reparto.nombres(de) : (cfg.nombreDeOwner.get(previo) ?? `el propietario ${previo}`);
+      reasignacion = { de, deOwner: previo, deNombre, anteriorAnotado: anotado };
     }
     const d = destino.decision;
     const linea = {
@@ -2099,7 +2410,7 @@ export async function ejecutarCiclo(ctx: Contexto, ahora: number = Date.now()): 
     if (ctx.modo === "activo") {
       try {
         await ctx.hs.solicitar("PATCH", `/crm/objects/${API}/${cfg.objeto}/${registro.id}`, {
-          properties: { ...escrito, asignacion_detalle: textoDetalle(flujo, destino, monto, reparto, instante) },
+          properties: { ...escrito, asignacion_detalle: textoDetalle(flujo, destino, monto, reparto, instante, reasignacion?.deNombre ?? null) },
         });
         escritura = "ok";
       } catch (error) {
@@ -2111,10 +2422,41 @@ export async function ejecutarCiclo(ctx: Contexto, ahora: number = Date.now()): 
     }
     registrar({ ...linea, escritura }, instante);
     resumen.decididos++;
+
+    // Contratos: el contrato traía otro ejecutivo → tarea para coordinación con el anterior y el nuevo.
+    if (reasignacion && cfg.tareaReasignacion) {
+      for (const owner of cfg.tareaReasignacion.owners) {
+        const tareaEscrita =
+          ctx.modo === "activo"
+            ? await crearTarea(
+                ctx,
+                cfg.tareaReasignacion,
+                owner,
+                registro.id,
+                `${flujo.nombre}: registro ${registro.id} reasignado de ${reasignacion.deNombre} a ${elegido.etiqueta}`,
+                `El algoritmo de asignación reemplazó el ${flujo.persona} que traía este registro. Antes: ${reasignacion.deNombre}. ` +
+                  `Ahora: ${elegido.etiqueta}. Regla: ${destino.regla}.`,
+                "MEDIUM",
+              )
+            : ESCRITURA_SOMBRA;
+        registrar({
+          tipo: "tarea_reasignacion",
+          flujo: flujo.clave,
+          modo: ctx.modo,
+          entorno: ctx.entorno,
+          id: registro.id,
+          ownerId: owner.id,
+          responsable: owner.nombre,
+          de: reasignacion.deOwner,
+          a: ownerId,
+          escritura: tareaEscrita,
+        });
+      }
+    }
     const como = d ? `Δ ${d.candidatos.find((c) => c.clave === d.elegido)!.delta.toFixed(3)} · ${destino.regla}` : destino.regla;
     console.log(
       `  ${flujo.nombre} #${registro.id}  ${monto === null ? "monto sin dato" : `monto ${cop(monto)}`}  →  ${elegido.etiqueta}  (${como})` +
-        `${d?.respaldo ? "  [respaldo: sobre el techo de todos]" : ""}${reasignacion ? "  [reasignación]" : ""}  [${ctx.modo}]`,
+        `${d?.respaldo ? "  [respaldo: sobre el techo de todos]" : ""}${reasignacion ? `  [reasignación: antes ${reasignacion.deNombre}]` : ""}  [${ctx.modo}]`,
     );
   }
   await avisarSinAsignar(ctx, sinAsignar, ahora, desdeMs);
@@ -2444,7 +2786,8 @@ function autoprueba(): number {
 
   // Para las reglas: un equipo pequeño de cada flujo, con pesos iguales.
   const pIgual: Parametros = { ...p, canonTipico: 2_500_000, roles: { analista: { c: 1, s: 1 }, coordinador: { c: 1, s: 1 }, ejecutivo: { c: 1, s: 1 } }, techos: {} };
-  const reparto = (presentes: Persona[], op: OpcionesReparto = { techo: false }, estado?: Estado): Reparto => ({
+  const reparto = (presentes: Persona[], op: OpcionesReparto = { techo: false }, estado?: Estado, activos: Persona[] = presentes): Reparto => ({
+    activos,
     presentes,
     competidores: competidoresDe(presentes),
     estado: estado ?? estadoVacio(presentes.map((a) => a.clave)),
@@ -2453,21 +2796,30 @@ function autoprueba(): number {
     nombres: (k) => k,
   });
   const analisis = [persona("miller", "analista"), persona("german", "analista"), persona("monica", "coordinador", false), persona("lorena", "coordinador", false)];
-  const reglasR = (suplente: string | null = null) =>
-    validarReglasAnalisis(
-      { directo: { persona: "monica", montoMayorA: 10_000_000, condiciones: [{ propiedad: "analisis_corredores", valor: "true", motivo: "negocio de corredores" }] }, suplente },
-      analisis,
-      "prueba",
-    );
-  const ejecutivos = [persona("e1", "ejecutivo"), persona("e2", "ejecutivo"), persona("e3", "ejecutivo"), persona("e4", "ejecutivo"), persona("ana", "coordinador", false)];
+  const reglasR = validarReglasAnalisis(
+    { directo: { persona: "monica", montoMayorA: 10_000_000, condiciones: [{ propiedad: "analisis_corredores", valor: "true", motivo: "negocio de corredores" }] } },
+    analisis,
+    "prueba",
+  );
+  // e1, e2 y e4 son los de directos; e3 y e5 solo reciben por su clave; ana, solo por su clave.
+  const ejecutivos = [
+    persona("e1", "ejecutivo"),
+    persona("e2", "ejecutivo"),
+    persona("e3", "ejecutivo"),
+    persona("e4", "ejecutivo"),
+    persona("e5", "ejecutivo"),
+    persona("ana", "coordinador", false),
+  ];
   const reglasC = validarReglasContratos(
-    { clavesCompartidas: { "44476": ["e1", "e2"] } },
-    { claves: { "100": ["e3"], "200": ["ana"], "44476": ["e1"] } },
-    { propietarios: [{ cedula: "1.020.304", ejecutivo: "e4" }] },
+    { clavesCompartidas: { "44476": ["e1", "e2"] }, directos: ["e1", "e2", "e4"], tareaReasignacion: { responsables: ["Ana Tavera"] } },
+    { claves: { "100": ["e3"], "200": ["ana"], "44476": ["e1"], "500": ["e5"] } },
+    { propietarios: [{ cedula: "1.020.304", ejecutivo: "e4" }, { cedula: "900.123.456-7", ejecutivo: "e3" }] },
     ejecutivos,
   );
+  const directos = ["e1", "e2", "e4"];
   const sin = (lista: Persona[], ...fuera: string[]) => lista.filter((a) => !fuera.includes(a.clave));
-  const contrato = (clave: string | null, cedula: string | null = null): Propiedades => ({ [PROP_CLAVE_ASESOR]: clave, [PROP_CEDULA_PROPIETARIO]: cedula });
+  const contrato = (clave: string | null, cedula: string | null = null, asociados?: { claves: string[]; documentos: string[] }): DatosContrato =>
+    datosContrato({ [PROP_CLAVE_ASESOR]: clave, [PROP_CEDULA_PROPIETARIO]: cedula }, asociados);
 
   const pruebas: [string, () => void][] = [
     ["lo que sube la meta es lo que se reparte: Σe y ΣE no se desvían", () => {
@@ -2589,6 +2941,18 @@ function autoprueba(): number {
       assert.equal(montoAnalisis({ radicacion_canon: null, valor_canon___admon: "2500000" }), 2_500_000);
       assert.equal(montoAnalisis({}), null);
     }],
+    ["monto de Análisis: manda la Radicación (la más reciente con dato) sobre la Solicitud y la orden de contrato", () => {
+      const m = riesgo.monto;
+      const rad = m.pipeline!.id;
+      const solicitud = { id: "68029852750", props: { pipeline: "935814405", valor_canon___admon: "9000000" } };
+      const orden = { id: "68006464383", props: { pipeline: "949387333" } };
+      const radVieja = { id: "68000000001", props: { pipeline: rad, radicacion_canon: "2000000", radicacion_administracion: "0" } };
+      const radNueva = { id: "68029789008", props: { pipeline: rad, radicacion_canon: "2300000", radicacion_administracion: "100000" } };
+      const radVacia = { id: "68099999999", props: { pipeline: rad } };
+      assert.equal(elegirMonto([solicitud, orden, radVieja, radNueva, radVacia], m), 2_400_000);
+      assert.equal(elegirMonto([solicitud, orden], m), 9_000_000, "sin Radicación, el asociado que tenga dato");
+      assert.equal(elegirMonto([orden], m), null);
+    }],
     ["fechas de HubSpot: ISO y milisegundos", () => {
       assert.equal(parsearInstante("2026-11-05T12:31:00.000Z"), Date.parse("2026-11-05T12:31:00Z"));
       assert.equal(parsearInstante("1793882400000"), 1793882400000);
@@ -2647,6 +3011,14 @@ function autoprueba(): number {
       assert.ok(!coincideNombre("GERMAN ANDRES ERAZO FORERO", "German"));
       assert.ok(!coincideNombre("GERMAN ANDRES ERAZO FORERO", "Eliana Rojas"));
     }],
+    ["propietarios: si varios coinciden con el nombre, gana el activo y luego el de nombre idéntico", () => {
+      const o = (id: string, firstName: string, lastName: string, userId: number | null) => ({ id, firstName, lastName, userId });
+      const calceto = [o("715043408", "Laura", "Calceto", null), o("1129581314", "LAURA JINETH", "CALCETO RODRIGUEZ", 1)];
+      assert.deepEqual(desempatarPropietarios(calceto, "Laura Jineth Calceto Rodriguez").map((x) => x.id), ["1129581314"]);
+      const dosActivos = [o("1", "Andrea", "Torres", 1), o("2", "Andrea Alanis", "Torres Mendoza", 2)];
+      assert.deepEqual(desempatarPropietarios(dosActivos, "Andrea Alanis Torres Mendoza").map((x) => x.id), ["2"]);
+      assert.equal(desempatarPropietarios([o("1", "Ana", "Uno", 1), o("2", "Ana", "Uno Dos", 2)], "Ana Uno Dos Tres").length, 2, "si nada desempata, sigue siendo un error");
+    }],
     ["un solo rol (ejecutivos): los casos y el monto quedan parejos entre todos", () => {
       const cinco = ["e1", "e2", "e3", "e4", "e5"].map((k) => persona(k, "ejecutivo"));
       const pe: Parametros = { ...p, canonTipico: 2_500_000, roles: { ejecutivo: { c: 1, s: 1 } }, techos: { e1: 9e6, e2: 9e6, e3: 9e6, e4: 9e6, e5: 9e6 } };
@@ -2692,6 +3064,17 @@ function autoprueba(): number {
       assert.ok(cumpleCola(contratos, { hs_pipeline_stage: contratos.colas[0].etapa, hubspot_owner_id: "9" }));
       assert.ok(propiedadesEscritas(contratos).includes("contrato_fechaasignacioncontrato") && !propiedadesEscritas(contratos).includes("fecha_asignacion_analista"));
     }],
+    ["fechas oficiales: Análisis escribe analisis_fechaasignacionanalisis; la reversión conoce también la fecha anterior", () => {
+      assert.equal(riesgo.propFecha, "analisis_fechaasignacionanalisis");
+      assert.ok(propiedadesEscritas(riesgo).includes("analisis_fechaasignacionanalisis") && !propiedadesEscritas(riesgo).includes("fecha_asignacion_analista"));
+      for (const p of ["analisis_fechaasignacionanalisis", "contrato_fechaasignacioncontrato", "fecha_asignacion_analista"]) assert.ok(TODAS_LAS_ESCRITAS.includes(p), p);
+    }],
+    ["ausencias: 'hasta' en null es hasta nuevo aviso; una fecha mal escrita es un error", () => {
+      const cal = validarCalendario({ ausencias: [{ persona: "e1", desde: "2026-11-16", hasta: null } as unknown as Ausencia] });
+      assert.ok(!presentesEn("2027-06-01", ejecutivos, cal).some((a) => a.clave === "e1"));
+      assert.ok(presentesEn("2026-11-13", ejecutivos, cal).some((a) => a.clave === "e1"));
+      assert.throws(() => validarCalendario({ ausencias: [{ persona: "e1", desde: "2026-11-16", hasta: "31/12/2026" }] }), /AAAA-MM-DD/);
+    }],
     ["objetos: Contratos se reconoce por su nombre exacto y no se confunde con 'Orden de contrato'", () => {
       assert.ok(contratos.esObjeto(normalizar("Contratos")) && contratos.esObjeto(normalizar("Contrato")));
       assert.ok(!contratos.esObjeto(normalizar("Orden de contrato")) && !contratos.esObjeto(normalizar("Análisis de riesgo")));
@@ -2706,43 +3089,58 @@ function autoprueba(): number {
       assert.throws(() => validarNomina({ personas: [{ ...base, reparto: false }] }, contratos, "prueba"), /ninguno de los ejecutivos activos entra al reparto/);
     }],
     ["Análisis: más de 10 millones va directo a la coordinadora; 10 millones exactos entran al reparto", () => {
-      const alto = destinoAnalisis(reglasR(), {}, 10_000_001, reparto(analisis));
+      const alto = destinoAnalisis(reglasR, {}, 10_000_001, reparto(analisis));
       assert.equal(alto.clave, "monica");
       assert.equal(alto.decision, null);
-      const justo = destinoAnalisis(reglasR(), {}, 10_000_000, reparto(analisis));
+      const justo = destinoAnalisis(reglasR, {}, 10_000_000, reparto(analisis));
       assert.ok(justo.clave === "miller" || justo.clave === "german");
       assert.ok(justo.decision);
     }],
     ["Análisis: lo de corredores va directo aunque sea pequeño; nunca le llega a una coordinadora por reparto", () => {
-      assert.equal(destinoAnalisis(reglasR(), { analisis_corredores: "true" }, 1_500_000, reparto(analisis)).clave, "monica");
+      assert.equal(destinoAnalisis(reglasR, { analisis_corredores: "true" }, 1_500_000, reparto(analisis)).clave, "monica");
       const r = reparto(analisis);
       for (let i = 0; i < 50; i++) {
-        const d = destinoAnalisis(reglasR(), { analisis_corredores: "false" }, 1_000_000 + i * 150_000, r);
+        const d = destinoAnalisis(reglasR, { analisis_corredores: "false" }, 1_000_000 + i * 150_000, r);
         assert.ok(d.clave === "miller" || d.clave === "german", `fue a ${d.clave}`);
       }
     }],
-    ["Análisis: si la coordinadora no está, lo directo va al suplente; sin suplente, espera en la cola", () => {
-      const sinMonica = sin(analisis, "monica");
-      assert.equal(destinoAnalisis(reglasR("lorena"), {}, 12_000_000, reparto(sinMonica)).clave, "lorena");
-      const espera = destinoAnalisis(reglasR(), {}, 12_000_000, reparto(sinMonica));
-      assert.equal(espera.clave, null);
-      assert.match(espera.regla, /no está/);
+    ["Análisis: lo directo va a la coordinadora aunque esté ausente (o no haya nadie); solo espera si no está activa", () => {
+      const ausente = destinoAnalisis(reglasR, {}, 12_000_000, reparto(sin(analisis, "monica"), undefined, undefined, analisis));
+      assert.equal(ausente.clave, "monica");
+      assert.match(ausente.regla, /aunque hoy figura ausente/);
+      assert.equal(destinoAnalisis(reglasR, { analisis_corredores: "true" }, 1, reparto([], undefined, undefined, analisis)).clave, "monica");
+      assert.equal(destinoAnalisis(reglasR, {}, 1_000_000, reparto([], undefined, undefined, analisis)).clave, null, "lo del reparto espera si no hay analistas");
+      const inactiva = destinoAnalisis(reglasR, {}, 12_000_000, reparto(sin(analisis, "monica")));
+      assert.equal(inactiva.clave, null);
+      assert.match(inactiva.regla, /no está activa/);
     }],
-    ["Contratos: la clave con un solo ejecutivo manda (aun si el propietario tiene otro); si ese ejecutivo no está, reparto entre los presentes", () => {
+    ["Contratos: la clave con un solo ejecutivo manda (aun si el propietario tiene otro); la de Ana Tavera va a ella", () => {
       const d = destinoContrato(reglasC, contrato("100", "1020304"), 3_000_000, reparto(ejecutivos));
       assert.equal(d.clave, "e3");
       assert.equal(d.decision, null);
-      const ausente = destinoContrato(reglasC, contrato("100"), 3_000_000, reparto(sin(ejecutivos, "e3")));
-      assert.ok(ausente.decision && ["e1", "e2", "e4"].includes(ausente.clave!), `fue a ${ausente.clave}`);
-      assert.match(ausente.regla, /no está/);
+      assert.match(d.regla, /ejecutivo único/);
       assert.equal(destinoContrato(reglasC, contrato("200"), 3_000_000, reparto(ejecutivos)).clave, "ana", "la clave fija de la coordinadora va a ella");
+      assert.equal(destinoContrato(reglasC, contrato("500"), 3_000_000, reparto(ejecutivos)).clave, "e5", "aunque no sea de directos");
     }],
-    ["Contratos: el propietario con ejecutivo fijo decide si la clave no tiene un solo ejecutivo", () => {
+    ["Contratos: si el ejecutivo que corresponde no está, reparto solo entre los de directos presentes", () => {
+      const r = reparto(sin(ejecutivos, "e3"));
+      for (let i = 0; i < 20; i++) {
+        const d = destinoContrato(reglasC, contrato("100"), 3_000_000, r);
+        assert.ok(d.decision && directos.includes(d.clave!), `fue a ${d.clave}`);
+        assert.match(d.regla, /que no está: reparto entre los ejecutivos de directos/);
+      }
+      assert.ok(directos.includes(destinoContrato(reglasC, contrato(null, "1020304"), 1, reparto(sin(ejecutivos, "e4"))).clave!));
+    }],
+    ["Contratos: el propietario con ejecutivo fijo decide si la clave no tiene un solo ejecutivo (basta una cédula de los arrendadores)", () => {
       assert.equal(destinoContrato(reglasC, contrato("999", "001020304"), 3_000_000, reparto(ejecutivos)).clave, "e4");
       assert.equal(destinoContrato(reglasC, contrato("44476", "1020304"), 3_000_000, reparto(ejecutivos)).clave, "e4");
       assert.equal(destinoContrato(reglasC, contrato(null, "1.020.304"), 3_000_000, reparto(ejecutivos)).clave, "e4");
+      const varios = contrato(null, null, { claves: [], documentos: ["555", "CC 1.020.304"] });
+      assert.equal(destinoContrato(reglasC, varios, 3_000_000, reparto(ejecutivos)).clave, "e4", "el segundo arrendador está en la lista");
+      assert.equal(destinoContrato(reglasC, contrato(null, null, { claves: [], documentos: ["900123456-7"] }), 1, reparto(ejecutivos)).clave, "e3", "NIT con dígito de verificación");
+      assert.equal(destinoContrato(reglasC, contrato(null, null, { claves: [], documentos: ["900123456"] }), 1, reparto(ejecutivos)).clave, "e3", "NIT sin dígito");
     }],
-    ["Contratos: una clave compartida se reparte solo entre sus ejecutivos (manda sobre la tabla); si ninguno está, entre todos", () => {
+    ["Contratos: una clave compartida se reparte solo entre sus ejecutivos (manda sobre la tabla); si ninguno está, entre los de directos", () => {
       const r = reparto(ejecutivos);
       const cuenta: Record<string, number> = {};
       for (let i = 0; i < 20; i++) {
@@ -2750,16 +3148,33 @@ function autoprueba(): number {
         cuenta[d.clave!] = (cuenta[d.clave!] ?? 0) + 1;
       }
       assert.deepEqual(Object.keys(cuenta).sort(), ["e1", "e2"]);
-      const d = destinoContrato(reglasC, contrato("44476"), 3_000_000, reparto(sin(ejecutivos, "e1", "e2")));
-      assert.ok(d.clave === "e3" || d.clave === "e4");
+      assert.equal(destinoContrato(reglasC, contrato("44476"), 3_000_000, reparto(sin(ejecutivos, "e1", "e2"))).clave, "e4");
     }],
-    ["Contratos: sin clave o con una clave fuera de la tabla, reparto entre todos los presentes, sin la coordinadora", () => {
+    ["Contratos: sin asesor o con una clave fuera de la tabla, reparto solo entre los de directos; sin ninguno, espera", () => {
       const r = reparto(ejecutivos);
       for (let i = 0; i < 30; i++) {
         const d = destinoContrato(reglasC, contrato(i % 2 ? null : "777"), 3_000_000, r);
-        assert.ok(d.clave !== "ana" && d.decision, `fue a ${d.clave}`);
+        assert.ok(d.decision && directos.includes(d.clave!), `fue a ${d.clave}`);
       }
-      assert.match(destinoContrato(reglasC, contrato(null), 1, r).regla, /sin clave/);
+      assert.match(destinoContrato(reglasC, contrato(null), 1, r).regla, /sin asesor/);
+      assert.match(destinoContrato(reglasC, contrato("777"), 1, r).regla, /777 sin ejecutivo en la tabla/);
+      const espera = destinoContrato(reglasC, contrato(null), 1, reparto(sin(ejecutivos, ...directos)));
+      assert.equal(espera.clave, null);
+      assert.match(espera.regla, /no hay ningún ejecutivo de directos presente/);
+    }],
+    ["Contratos: la clave sale del contrato o, si no la trae, del Asesor asociado", () => {
+      assert.equal(contrato(null, null, { claves: ["", "100"], documentos: [] }).clave, "100");
+      assert.equal(contrato("200", null, { claves: ["100"], documentos: [] }).clave, "200", "la del contrato manda");
+      assert.equal(destinoContrato(reglasC, contrato(null, null, { claves: ["100.0"], documentos: [] }), 1, reparto(ejecutivos)).clave, "e3");
+    }],
+    ["documentos: variantes con prefijo, puntos y dígito de verificación; un documento de prueba no se confunde", () => {
+      assert.deepEqual(variantesDocumento("1.020.304"), ["1020304"]);
+      assert.deepEqual(variantesDocumento("CC 1.020.304"), ["CC1020304", "1020304"]);
+      assert.deepEqual(variantesDocumento("900.123.456-7"), ["9001234567", "900123456"]);
+      assert.deepEqual(variantesDocumento("PRUEBA-NGDS-DEV-12345678"), ["PRUEBANGDSDEV12345678"]);
+      assert.deepEqual(variantesDocumento(null), []);
+      assert.equal(reglasC.totalPropietarios, 2);
+      assert.deepEqual(reglasC.tareaReasignacion, { responsables: ["Ana Tavera"] });
     }],
     ["carga en tiempo real: gana quien tiene menos abierto; en empate, quien lleva más tiempo sin recibir", () => {
       const tres = ejecutivos.slice(0, 3);
@@ -2789,6 +3204,9 @@ function autoprueba(): number {
       assert.throws(() => validarReglasAnalisis({ directo: { persona: "nadie", montoMayorA: 1 } }, analisis, "prueba"), /no está en la nómina/);
       assert.throws(() => validarReglasContratos({}, { claves: { "1": ["fantasma"] } }, null, ejecutivos), /fantasma/);
       assert.throws(() => validarReglasContratos({}, null, { propietarios: [{ cedula: "1", ejecutivo: "e1" }, { cedula: "001", ejecutivo: "e2" }] }, ejecutivos), /otro ejecutivo fijo/);
+      assert.throws(() => validarReglasContratos({ directos: ["e1", "fantasma"] }, null, null, ejecutivos), /directos.*fantasma/);
+      assert.throws(() => validarReglasContratos({ directos: ["e1"], tareaReasignacion: { responsables: [] } }, null, null, ejecutivos), /tareaReasignacion/);
+      assert.deepEqual(validarReglasContratos({}, null, null, ejecutivos).directos, [], "sin 'directos' carga, pero el diagnóstico no deja arrancar");
     }],
     ["tabla de asesores (CSV): encuentra las columnas, junta las claves compartidas y avisa los nombres que no conoce", () => {
       const equipo = [
@@ -2957,10 +3375,7 @@ async function main(argumentos: string[]): Promise<number> {
 
   const aviso = arranque.modo === "activo" ? `ESCRIBE en HubSpot (${entorno})` : "SOMBRA: decide y registra, NO escribe en HubSpot";
   console.log(`\nAsignación equilibrada ${VERSION_MOTOR} · ${aviso}`);
-  for (const ctx of contextos) {
-    const soloRegla = ctx.pool.filter((a) => !a.reparto);
-    console.log(`${ctx.flujo.nombre}: reparto entre ${competidoresDe(ctx.pool).map((a) => a.etiqueta).join(", ")}${soloRegla.length ? `; por regla: ${soloRegla.map((a) => a.etiqueta).join(", ")}` : ""}`);
-  }
+  for (const ctx of contextos) console.log(`${ctx.flujo.nombre}: ${resumenEquipo(ctx.pool, ctx.reglas, ctx.flujo.personas)}`);
   console.log(unaVez ? "Un solo ciclo.\n" : `Un ciclo cada ${INTERVALO_MS / 60_000} min, de 7:30 a 4:30 (Ctrl+C para salir).\n`);
 
   if (unaVez) {

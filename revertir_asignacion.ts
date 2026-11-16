@@ -17,8 +17,9 @@
  *     vuelva a decidir.
  * Lo revertido sale de logs/decisiones.jsonl y pasa a logs/revertidas.jsonl, con el resultado de cada uno.
  *
- * No deshace lo que HubSpot haya hecho por su cuenta con esos cambios (workflows, notificaciones o tareas). El
- * historial de cada propiedad conserva la asignación y la reversión.
+ * No deshace lo que HubSpot haya hecho por su cuenta con esos cambios (workflows, notificaciones), ni borra las tareas
+ * que creó el script (por reasignación o por no asignar a tiempo): esas se cierran a mano. El historial de cada
+ * propiedad conserva la asignación y la reversión.
  */
 
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -106,6 +107,7 @@ const comoEstaba = (v: Valores, anterior: Valores, escrito: Valores) => Object.k
 const NOMBRES: Record<string, string> = {
   hubspot_owner_id: "el propietario",
   hs_pipeline_stage: "la etapa",
+  analisis_fechaasignacionanalisis: "la fecha de asignación",
   fecha_asignacion_analista: "la fecha de asignación",
   contrato_fechaasignacioncontrato: "la fecha de asignación",
 };
@@ -279,7 +281,7 @@ async function main(argumentos: string[]): Promise<number> {
   for (const p of pasos) {
     if (p.accion !== "restaurar" || !nombres) continue;
     const { anterior, escrito } = p.d as Required<Decision>;
-    const fecha = anterior.fecha_asignacion_analista ?? anterior.contrato_fechaasignacioncontrato;
+    const fecha = anterior.analisis_fechaasignacionanalisis ?? anterior.fecha_asignacion_analista ?? anterior.contrato_fechaasignacioncontrato;
     const fechaYDetalle = vacio(fecha) && vacio(anterior.asignacion_detalle) ? "vacíos" : "los de antes";
     p.motivo =
       `propietario ${nombres.propietario(escrito.hubspot_owner_id)} → ${nombres.propietario(anterior.hubspot_owner_id)} · ` +
