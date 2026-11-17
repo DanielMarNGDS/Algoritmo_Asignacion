@@ -37,8 +37,8 @@ export async function iniciarMock() {
   ], [
     ...SISTEMA, prop("contrato_fechaasignacioncontrato", "datetime"), prop("fecha_asignacion_analista", "datetime"), prop("contrato_canon", "number"),
     prop("contrato_orden_claveasesorw"), prop("contrato_orden_numdocpropw"), prop("contrato_reasignaciones", "number"), prop("contrato_fecha_ultima_reasignacion", "datetime"),
-    // Como en producción: una lista de opciones con ownerIds, que no tiene a todos.
-    prop("contrato_ejecutivo_anterior", "enumeration", { options: [{ value: OWNERS.e_b, label: "Beta" }, { value: OWNERS.e_a, label: "Alfa" }] }),
+    // Como en el sandbox y en producción: de tipo propietario. La API no lista opciones y acepta cualquier propietario.
+    prop("contrato_ejecutivo_anterior", "enumeration", { options: [], referencedObjectType: "OWNER", externalOptions: true }),
   ]);
   nuevo("2-300", "orden_contrato", "Orden de contrato", "Órdenes de contrato", [], SISTEMA);
   const asesores = nuevo(ASESORES, "asesor", "Asesor", "Asesores", [], [prop("asesor_clave", "number"), prop("asesor_nombre")]);
@@ -149,8 +149,9 @@ export async function iniciarMock() {
             const def = o.propiedades.find((p) => p.name === k);
             if (!def) return responder(400, { message: `la propiedad ${k} no existe` });
             if (k === "hs_pipeline_stage" && !etapas.includes(v)) return responder(400, { message: `etapa inválida ${v}` });
-            if (k === "hubspot_owner_id" && v !== "" && !M.owners.some((x) => x.id === v)) return responder(400, { message: `propietario inválido ${v}` });
-            if (def.options && v !== "" && !def.options.some((x) => x.value === v)) return responder(400, { message: `${v} no es una opción de ${k}` });
+            const dePropietario = k === "hubspot_owner_id" || def.referencedObjectType === "OWNER";
+            if (dePropietario && v !== "" && !M.owners.some((x) => x.id === v)) return responder(400, { message: `propietario inválido ${v} en ${k}` });
+            if (!dePropietario && def.options && v !== "" && !def.options.some((x) => x.value === v)) return responder(400, { message: `${v} no es una opción de ${k}` });
             if (def.type === "datetime" && v !== "" && Number.isNaN(Date.parse(v))) return responder(400, { message: `fecha inválida ${v}` });
           }
           for (const [k, v] of Object.entries(cuerpo.properties ?? {})) {

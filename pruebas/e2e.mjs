@@ -81,6 +81,8 @@ await escenario("diagnóstico completo en la simulación", async ({ correr }) =>
   assert.match(r.salida, /contactos "Arrendador Cto" \(tipo 439\)/);
   assert.match(r.salida, /Radicación \(0-3, pipeline 935981686\)/);
   assert.match(r.salida, /Directo a monica, aunque esté ausente/);
+  assert.match(r.salida, /contrato_ejecutivo_anterior \(de tipo propietario\)/);
+  assert.doesNotMatch(r.salida, /no tiene como opción/);
 });
 
 await escenario("diagnóstico: sin 'directos' en las reglas de Contratos no arranca", async ({ correr }) => {
@@ -182,7 +184,7 @@ await escenario("Contratos: tabla, Asesor asociado, arrendador con ejecutivo fij
   assert.match(c4.asignacion_detalle, /reasignación: antes lo tenía e_b/);
   const c5 = props(M, C.objeto, 5);
   assert.equal(c5.contrato_reasignaciones, "1", "venir de alguien fuera de la nómina también es reasignación");
-  assert.equal(c5.contrato_ejecutivo_anterior ?? null, null, "pero no es una opción de la propiedad: no se anota");
+  assert.equal(c5.contrato_ejecutivo_anterior, O.otro, "la propiedad es de tipo propietario: se anota cualquier propietario");
   assert.match(c5.asignacion_detalle, /antes lo tenía Otra Persona/);
   assert.equal(props(M, C.objeto, 1).contrato_reasignaciones ?? null, null, "la primera asignación no cuenta");
 
@@ -196,7 +198,7 @@ await escenario("Contratos: tabla, Asesor asociado, arrendador con ejecutivo fij
   salidaOk(v);
   const c4b = props(M, C.objeto, 4);
   assert.deepEqual([c4b.hubspot_owner_id, c4b.hs_pipeline_stage, c4b.contrato_reasignaciones, c4b.contrato_ejecutivo_anterior, c4b.contrato_fecha_ultima_reasignacion], [O.e_b, C.asignacion, "1", null, null]);
-  assert.deepEqual([props(M, C.objeto, 5).hubspot_owner_id, props(M, C.objeto, 5).contrato_reasignaciones], [O.otro, null]);
+  assert.deepEqual([props(M, C.objeto, 5).hubspot_owner_id, props(M, C.objeto, 5).contrato_reasignaciones, props(M, C.objeto, 5).contrato_ejecutivo_anterior], [O.otro, null, null]);
   assert.equal(props(M, C.objeto, 1).hubspot_owner_id, null);
 });
 
@@ -209,14 +211,15 @@ await escenario("Contratos: ejecutivo de la clave ausente hasta nuevo aviso → 
   assert.ok(log().filter((l) => l.tipo === "decision").every((l) => /que no está: reparto entre los ejecutivos de directos/.test(l.regla)));
 }, { "ausencias.json": { diasLaborales: [1, 2, 3, 4, 5], ausencias: [{ persona: "e_a", desde: "2026-11-16", hasta: null }] } });
 
-await escenario("Contratos: ejecutivo anterior sin opción en HubSpot → la reasignación se escribe sin él (no falla) y hay tarea", async ({ M, correr }) => {
-  M.contrato(1, { hs_pipeline_stage: C.asignacion, contrato_orden_claveasesorw: "100", hubspot_owner_id: O.e_c });
+await escenario("Contratos: el propietario anterior ya no existe en HubSpot → la reasignación se escribe sin el ejecutivo anterior (no falla) y hay tarea", async ({ M, correr }) => {
+  M.contrato(1, { hs_pipeline_stage: C.asignacion, contrato_orden_claveasesorw: "100", hubspot_owner_id: "777" });
   salidaOk(await correr([...ACTIVO, "--flujo", "contratos"]));
   const x = props(M, C.objeto, 1);
   assert.equal(x.hubspot_owner_id, O.e_a);
   assert.equal(x.contrato_reasignaciones, "1");
   assert.equal(x.contrato_ejecutivo_anterior ?? null, null);
   assert.equal(M.tareas.length, 1);
+  assert.match(M.tareas[0].properties.hs_task_subject, /reasignado de el propietario 777 a e_a/);
 });
 
 await escenario("Contratos: nadie presente → tarea para Olga y Ana Tavera después de 3 min, una sola vez", async ({ M, correr }) => {

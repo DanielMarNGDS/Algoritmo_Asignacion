@@ -1706,6 +1706,8 @@ interface PropiedadHS {
   label: string;
   type: string;
   options?: { value: string; label: string }[];
+  /** "OWNER": la propiedad es de tipo propietario; acepta cualquier ownerId y la API no lista opciones. */
+  referencedObjectType?: string;
 }
 interface PropietarioHS {
   id: string;
@@ -1891,6 +1893,7 @@ export async function diagnosticar(
 
   // Propiedades
   let opcionesAnterior: Set<string> | null = null;
+  let anteriorEsPropietario = false;
   let fechaOk = false;
   if (objeto) {
     try {
@@ -1917,8 +1920,15 @@ export async function diagnosticar(
         const faltanR = [r.anterior, r.contador, r.fecha].filter((n) => !porNombre.has(n));
         if (faltanR.length) nota("error", `Faltan las propiedades de reasignación: ${faltanR.join(", ")}.`);
         else {
-          opcionesAnterior = new Set((porNombre.get(r.anterior)!.options ?? []).map((o) => o.value));
-          nota("ok", `Propiedades de reasignación: ${r.anterior} (${opcionesAnterior.size} opciones), ${r.contador}, ${r.fecha}`);
+          const def = porNombre.get(r.anterior)!;
+          // De tipo propietario (así está en el sandbox y en producción): acepta cualquier propietario de la cuenta. Las
+          // opciones se llenan abajo con la lista de propietarios.
+          anteriorEsPropietario = def.referencedObjectType === "OWNER";
+          if (!anteriorEsPropietario) opcionesAnterior = new Set((def.options ?? []).map((o) => o.value));
+          nota(
+            "ok",
+            `Propiedades de reasignación: ${r.anterior} (${anteriorEsPropietario ? "de tipo propietario" : `${opcionesAnterior!.size} opciones`}), ${r.contador}, ${r.fecha}`,
+          );
         }
       }
     } catch (error) {
@@ -2024,6 +2034,7 @@ export async function diagnosticar(
   } catch (error) {
     nota("error", `No se pudieron leer los propietarios (scope crm.objects.owners.read): ${mensajeDe(error)}`);
   }
+  if (anteriorEsPropietario && propietarios.length) opcionesAnterior = new Set(propietarios.map((o) => o.id));
   if (opcionesAnterior && flujo.reasignacion) {
     const sinOpcion = pool.filter((a) => ownerDeClave.has(a.clave) && !opcionesAnterior!.has(ownerDeClave.get(a.clave)!));
     if (sinOpcion.length) {
