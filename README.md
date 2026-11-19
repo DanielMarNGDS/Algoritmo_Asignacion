@@ -86,7 +86,7 @@ hallazgos_hubspot_mongo.html  NO pertenece a este paquete (ver sección 7)
 | `data/<flujo>/reglas.json` | Reglas de negocio. En Análisis, lo que va directo y a quién. En Contratos, las claves compartidas, los ejecutivos de directos y las dos tareas (por no asignar a tiempo y por reasignación) | Sí |
 | `data/contratos/asesores.json` | Clave del asesor → ejecutivo. Lo genera `--importar-asesores` desde el Excel de Ana; **todavía no existe** | Sí |
 | `data/contratos/propietarios.json` | Cédula del propietario → ejecutivo fijo, de la lista del correo de Ana. **Hoy está vacío** | **No: tiene cédulas** |
-| `data/ausencias.json` | Días laborales, festivos (hasta el 31-dic-2027) y ausencias de cada persona (`"hasta": null` es hasta nuevo aviso) | Sí |
+| `data/ausencias.json` | Ausencias de cada persona (`"hasta": null` es hasta nuevo aviso). Los días laborales y los festivos (hasta el 31-dic-2027) ya no detienen el script: solo cuentan para la carga de Análisis (ventana de 30 días hábiles y olvido diario) | Sí |
 | `data/PAUSA`, `data/<flujo>/PAUSA` | Interruptores de apagado, global o por flujo. Si el archivo existe, no se asigna nada | No |
 
 **Organización del código.** `asignacion_equilibrada.ts` está dividido en secciones numeradas:
@@ -125,7 +125,7 @@ node revertir_asignacion.ts [--aplicar]         deshace asignaciones de prueba
 Opciones comunes:
 - `--flujo analisis_riesgo|contratos`: solo ese flujo. Se puede repetir; por defecto corre los dos.
 - `--produccion`: usa `HUBSPOT_TOKEN` en vez de `HUBSPOT_TOKEN_SANDBOX`.
-- `--ignorar-horario`: ejecuta fuera de 7:30 a 4:30 y en días no laborales, incluidos los festivos de `data/ausencias.json` (pruebas). Las ausencias de cada persona se siguen respetando.
+- **Sin horario ni festivos** (desde el 19 de noviembre): el script asigna a cualquier hora y todos los días, festivos incluidos. Solo respeta las ausencias de cada persona. `--ignorar-horario` ya no hace nada; se acepta para no romper disparadores viejos que todavía lo pasan.
 
 **Seguro por defecto.** Sin `--activar` corre en **modo sombra**: decide exactamente como si escribiera, pero solo anota en `logs/decisiones.jsonl`. Escribe en HubSpot solo con `--activar`. El entorno por defecto es el sandbox.
 
@@ -133,7 +133,7 @@ Opciones comunes:
 
 | Código | Cuándo |
 |---|---|
-| `0` | Ciclo correcto, aunque algún registro quede esperando. O ciclo omitido sin tocar HubSpot: fuera de horario, día no laboral, interruptor `PAUSA`, o ya hay otra ejecución de menos de 10 min |
+| `0` | Ciclo correcto, aunque algún registro quede esperando. O ciclo omitido sin tocar HubSpot: interruptor `PAUSA`, o ya hay otra ejecución de menos de 10 min |
 | `1` | Falló un ciclo o hubo un error fatal de HubSpot |
 | `2` | Error de uso o de configuración; o el candado lleva 10 min o más ocupado |
 
@@ -141,15 +141,14 @@ Opciones comunes:
 
 n8n es solo el timbre; el script hace todo lo demás.
 
-1. Un Schedule Trigger corre cada 30 s, de lunes a viernes, de 7:30 a 4:30, en la zona horaria `America/Bogota`.
+1. Un Schedule Trigger corre cada 30 s, todos los días y a cualquier hora (`*/30 * * * * *`).
 2. El nodo **Configuración** (Code) tiene lo único que se cambia a mano:
    - `ENTORNO`: `sandbox` o `produccion`.
    - `ACTIVAR`: modo sombra o escribir.
-   - `IGNORAR_HORARIO`.
 
    Con eso arma los IDs de los objetos y las consultas de las dos colas, con los mismos filtros que `filtrosCola` del script.
 3. Dos HTTP Request consultan HubSpot (`/crm/objects/2026-09/{objeto}/search`) con `limit: 1` y leen solo `total`.
-4. Si alguna cola tiene registros, ejecuta `node asignacion_equilibrada.ts --una-vez [--produccion] [--activar] [--ignorar-horario] --flujo ...`.
+4. Si alguna cola tiene registros, ejecuta `node asignacion_equilibrada.ts --una-vez [--produccion] [--activar] --flujo ...`.
 5. Si el código de salida no es 0, marca la ejecución como error.
 
 Archivos:

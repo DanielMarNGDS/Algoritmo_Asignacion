@@ -5,7 +5,8 @@
  * Anexo:   C:\Temp\Plan_Asignacion_Equilibrada_Analisis_Riesgo_detalle.md (datos y simulaciones)
  * Reglas:  "Reglas de asignación — Análisis de riesgo y Contratos" (Duvan, 16-nov-2026)
  *
- * Qué hace: de 7:30 a 4:30 reparte los registros que esperan responsable en dos flujos (ver FLUJOS):
+ * Qué hace: a cualquier hora y todos los días, festivos incluidos (desde el 19-nov-2026), reparte los registros que
+ * esperan responsable en dos flujos (ver FLUJOS):
  *   analisis_riesgo  objeto "Análisis de riesgo": de "Asignacion de analista" y de "Aplazado" (solo lo que aplazó el
  *                    motor), siempre sin propietario, a "Analista asignado y en tramite". Lo de más de 10 millones
  *                    (canon + administración de la Radicación, a la que se llega por la Solicitud asociada) y lo de
@@ -23,15 +24,15 @@
  * Uso (Node 24, sin dependencias):
  *   node asignacion_equilibrada.ts                  ciclo continuo cada 2 min en MODO SOMBRA (decide y registra, no escribe)
  *   node asignacion_equilibrada.ts --activar        igual, pero escribe en HubSpot
- *   node asignacion_equilibrada.ts --una-vez        un solo ciclo y termina (para n8n o el Programador de tareas). Fuera de
- *                                                   horario, en pausa o con otra ejecución en curso sale con 0 sin tocar HubSpot
+ *   node asignacion_equilibrada.ts --una-vez        un solo ciclo y termina (para n8n, un CronJob o el Programador de
+ *                                                   tareas). En pausa o con otra ejecución en curso sale con 0 sin tocar HubSpot
  *   node asignacion_equilibrada.ts --diagnostico    revisa token, scopes, objetos, etapas, propiedades, reglas y propietarios
  *   node asignacion_equilibrada.ts --parametros     recalcula data/<flujo>/parametros.json desde AGSSA (--desde y --hasta opcionales)
  *   node asignacion_equilibrada.ts --importar-asesores <archivo.xlsx|.csv>
  *                                                   convierte el Excel de Ana en data/contratos/asesores.json
  *   node asignacion_equilibrada.ts --autoprueba     pruebas del motor y de las reglas (no toca HubSpot ni AGSSA)
- *   Extras: --flujo analisis_riesgo|contratos (solo ese flujo; por defecto, los dos), --produccion (usa HUBSPOT_TOKEN
- *   en vez de HUBSPOT_TOKEN_SANDBOX) y --ignorar-horario (pruebas).
+ *   Extras: --flujo analisis_riesgo|contratos (solo ese flujo; por defecto, los dos) y --produccion (usa HUBSPOT_TOKEN
+ *   en vez de HUBSPOT_TOKEN_SANDBOX). --ignorar-horario ya no hace nada: se acepta para no romper disparadores viejos.
  *
  * Archivos (junto a este script):
  *   .env                              HUBSPOT_TOKEN_SANDBOX y HUBSPOT_TOKEN
@@ -90,8 +91,6 @@ export const RUTA = {
 /** Versión de las rutas de la API de HubSpot. Desde el 14-nov-2026 el código nuevo usa 2026-09. */
 export const API = "2026-09";
 const OFFSET_BOGOTA_MS = -5 * 3_600_000; // Colombia no tiene horario de verano
-const INICIO_MIN = 7 * 60 + 30; // 7:30, en minutos desde la medianoche
-const FIN_MIN = 16 * 60 + 30; // 4:30 p. m.
 const INTERVALO_MS = 2 * 60_000; // un ciclo cada 2 minutos
 const MEMORIA = 0.9; // δ: cada día hábil los saldos se multiplican por 0,9
 const VENTANA_DIAS_HABILES = 30; // historial con el que se reconstruyen los saldos
@@ -429,7 +428,6 @@ export interface Contexto {
   reglas: Reglas;
   /** Si no viene, se lee data/ausencias.json en cada ciclo (coordinación lo edita durante el día). */
   calendario?: Calendario;
-  ignorarHorario?: boolean;
 }
 
 export interface ResumenCiclo {
@@ -541,10 +539,6 @@ export function parsearInstante(valor: unknown): number | null {
 // ── Tiempo en hora de Colombia ────────────────────────────────────────────────
 
 export const fechaBogota = (ms: number): string => new Date(ms + OFFSET_BOGOTA_MS).toISOString().slice(0, 10);
-export const minutosBogota = (ms: number): number => {
-  const d = new Date(ms + OFFSET_BOGOTA_MS);
-  return d.getUTCHours() * 60 + d.getUTCMinutes();
-};
 const horaLocal = (ms: number): string => new Date(ms + OFFSET_BOGOTA_MS).toISOString().slice(0, 16).replace("T", " ");
 export const diaSemana = (fecha: string): number => new Date(`${fecha}T00:00:00Z`).getUTCDay();
 export function sumarDias(fecha: string, n: number): string {
@@ -552,27 +546,23 @@ export function sumarDias(fecha: string, n: number): string {
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
-export const dentroDeHorario = (ms: number): boolean => {
-  const m = minutosBogota(ms);
-  return m >= INICIO_MIN && m <= FIN_MIN;
-};
 
 // ── Calendario y presencia ────────────────────────────────────────────────────
 
 const cubre = (a: Ausencia, fecha: string) => a.desde <= fecha && fecha <= a.hasta;
 
-/** Día laboral = día de la semana laboral y sin una ausencia de "*" (festivo). */
+/**
+ * Día laboral = día de la semana laboral y sin una ausencia de "*" (festivo). Desde el 19-nov ya no decide si el script
+ * corre: solo cuenta para la carga por historial (los 30 días hábiles de la ventana y el olvido diario).
+ */
 export const esDiaLaboral = (fecha: string, cal: Calendario): boolean =>
   cal.diasLaborales.includes(diaSemana(fecha)) && !cal.ausencias.some((a) => a.persona === "*" && cubre(a, fecha));
 
 /**
- * Quiénes están ese día: la nómina activa sin los ausentes. Un día no laboral no tiene presentes, salvo con
- * ignorarDiaLaboral (--ignorar-horario, pruebas): entonces el festivo (ausencia de "*") no cuenta, pero las ausencias
- * de cada persona sí.
+ * Quiénes están ese día: la nómina activa sin los que tienen una ausencia personal. Los fines de semana y los festivos
+ * no sacan a nadie: el script asigna todos los días, a cualquier hora (desde el 19-nov).
  */
-export function presentesEn(fecha: string, pool: Persona[], cal: Calendario, ignorarDiaLaboral = false): Persona[] {
-  if (!ignorarDiaLaboral && !esDiaLaboral(fecha, cal)) return [];
-  // Si el día era festivo, ya se descartó arriba o se pidió ignorarlo: aquí solo cuentan las ausencias personales.
+export function presentesEn(fecha: string, pool: Persona[], cal: Calendario): Persona[] {
   return pool.filter((a) => !cal.ausencias.some((x) => x.persona === a.clave && cubre(x, fecha)));
 }
 
@@ -739,7 +729,8 @@ export function asignarCaso(estado: Estado, presentes: Persona[], canon: number 
 
 /**
  * Carga por historial: reconstruye e_j y E_j repitiendo, día a día, lo que hizo el reparto: la memoria al empezar
- * cada día hábil y, por cada asignación, la subida de meta de los presentes más el caso recibido.
+ * cada día hábil y, por cada asignación (de cualquier día, también fines de semana y festivos), la subida de meta de
+ * los presentes más el caso recibido. Un día no hábil con asignaciones no suma olvido.
  * Los presentes de un día son la nómina menos los ausentes, más quien haya recibido casos ese día.
  */
 export function reconstruirEstado(eventos: Evento[], hoy: string, pool: Persona[], cal: Calendario, p: Parametros): Estado {
@@ -760,8 +751,7 @@ export function reconstruirEstado(eventos: Evento[], hoy: string, pool: Persona[
 
   for (let dia = fechaBogota(validos[0].instante); dia <= hoy; dia = sumarDias(dia, 1)) {
     const delDia = porDia.get(dia) ?? [];
-    if (!esDiaLaboral(dia, cal) && !delDia.length) continue;
-    aplicarMemoria(estado);
+    if (esDiaLaboral(dia, cal)) aplicarMemoria(estado);
     if (!delDia.length) continue;
 
     const recibieron = new Set(delDia.map((ev) => ev.clave));
@@ -2270,10 +2260,7 @@ export async function ejecutarCiclo(ctx: Contexto, ahora: number = Date.now()): 
   const hoy = fechaBogota(ahora);
   const { cfg, params, flujo } = ctx;
 
-  if (!ctx.ignorarHorario) {
-    if (!esDiaLaboral(hoy, cal)) return { ...resumen, omitido: "hoy no es día laboral" };
-    if (!dentroDeHorario(ahora)) return { ...resumen, omitido: "fuera del horario (7:30 a 4:30)" };
-  }
+  // Sin restricción de horario ni de días: corre de noche, los fines de semana y los festivos (decisión del 19-nov).
   const pausa = pausaActiva(flujo);
   if (pausa) return { ...resumen, omitido: `interruptor de apagado activo (${pausa})` };
 
@@ -2291,7 +2278,7 @@ export async function ejecutarCiclo(ctx: Contexto, ahora: number = Date.now()): 
     if (!pendientes.length) return resumen;
   }
 
-  const presentes = presentesEn(hoy, ctx.pool, cal, ctx.ignorarHorario);
+  const presentes = presentesEn(hoy, ctx.pool, cal);
   // Sin nadie presente igual se revisa la cola: una regla puede mandarle a alguien aunque esté ausente (Mónica).
   if (!presentes.length) alerta(flujo, "nadie_presente", `Hay ${pendientes.length} registro(s) en la cola y nadie presente hoy; solo se asigna lo que va directo.`);
   if (ctx.modo === "activo" && cola.length > MAX_COLA_ACTIVA) {
@@ -2521,7 +2508,6 @@ interface Arranque {
   modo: Modo;
   entorno: Entorno;
   hs: ClienteHS;
-  ignorarHorario: boolean;
   flujos: Flujo[];
 }
 
@@ -2541,7 +2527,7 @@ async function prepararContextos(a: Arranque, imprimir: boolean): Promise<Contex
     const { pool, params, reglas } = cargarLocal(flujo);
     if (imprimir) console.log(`\n── ${flujo.nombre} ──`);
     const { cfg } = await diagnosticar(a.hs, flujo, pool, params, reglas, imprimir);
-    if (cfg) contextos.push({ flujo, modo: a.modo, entorno: a.entorno, hs: a.hs, cfg, pool, params, reglas, ignorarHorario: a.ignorarHorario });
+    if (cfg) contextos.push({ flujo, modo: a.modo, entorno: a.entorno, hs: a.hs, cfg, pool, params, reglas });
     else fallidos.push(flujo);
   }
   if (fallidos.length) {
@@ -2901,14 +2887,30 @@ function autoprueba(): number {
       assert.equal(estado.e.a4, 0);
       assert.equal(estado.E.a4, 0);
     }],
-    ["festivo: sin --ignorar-horario no hay presentes; con él, todos menos quien tenga su propia ausencia", () => {
+    ["sin horario ni festivos: un festivo y un sábado tienen presentes (todos menos quien tenga su propia ausencia)", () => {
       const cal: Calendario = {
         diasLaborales: [1, 2, 3, 4, 5],
-        ausencias: [{ persona: "*", desde: "2026-11-16", hasta: "2026-11-16" }, { persona: "a2", desde: "2026-11-16", hasta: "2026-11-16" }],
+        ausencias: [{ persona: "*", desde: "2026-11-16", hasta: "2026-11-16" }, { persona: "a2", desde: "2026-11-16", hasta: "2026-11-21" }],
       };
       assert.equal(esDiaLaboral("2026-11-16", cal), false);
-      assert.deepEqual(presentesEn("2026-11-16", pool, cal), []);
-      assert.deepEqual(presentesEn("2026-11-16", pool, cal, true).map((a) => a.clave), claves.filter((k) => k !== "a2"));
+      assert.deepEqual(presentesEn("2026-11-16", pool, cal).map((a) => a.clave), claves.filter((k) => k !== "a2"), "festivo");
+      assert.deepEqual(presentesEn("2026-11-21", pool, cal).map((a) => a.clave), claves.filter((k) => k !== "a2"), "sábado");
+      assert.deepEqual(presentesEn("2026-11-22", pool, cal).map((a) => a.clave), claves, "domingo, ya sin la ausencia de a2");
+    }],
+    ["un caso asignado en sábado cuenta en la carga, pero el sábado no suma olvido", () => {
+      const viernes: Evento = { id: "1", instante: Date.parse("2026-11-06T10:00:00-05:00"), clave: "a1", monto: 3_000_000 };
+      const sabado: Evento = { id: "2", instante: Date.parse("2026-11-07T22:30:00-05:00"), clave: "a2", monto: 2_000_000 };
+      const esperado = reconstruirEstado([viernes], "2026-11-06", pool, calSemana, p);
+      const w = pesoDeCaso(sabado.monto, p);
+      subirMeta(esperado, pool, w, p);
+      registrarAsignacion(esperado, "a2", w);
+      const conSabado = reconstruirEstado([viernes, sabado], "2026-11-08", pool, calSemana, p);
+      for (const k of claves) {
+        cerca(conSabado.e[k], esperado.e[k]);
+        cerca(conSabado.E[k], esperado.E[k]);
+      }
+      const lunes = reconstruirEstado([viernes, sabado], "2026-11-09", pool, calSemana, p);
+      for (const k of claves) cerca(lunes.e[k], esperado.e[k] * 0.9, 1e-9);
     }],
     ["la memoria: dos días hábiles después los saldos valen 0,9² de lo que valían", () => {
       const eventos: Evento[] = [0, 1, 2, 3].map((i) => ({ id: String(i), instante: Date.parse(`2026-11-02T08:0${i}:00-05:00`), clave: ["a1", "a1", "a2", "c1"][i], monto: 2_000_000 + i * 1_500_000 }));
@@ -2971,11 +2973,7 @@ function autoprueba(): number {
       assert.equal(parsearInstante("1793882400000"), 1793882400000);
       assert.equal(parsearInstante(""), null);
     }],
-    ["horario: de 7:30 a 4:30 hora de Colombia", () => {
-      const a = (hora: string) => dentroDeHorario(Date.parse(`2026-11-05T${hora}-05:00`));
-      assert.deepEqual([a("07:29:59"), a("07:30:00"), a("12:00:00"), a("16:30:30"), a("16:31:00")], [false, true, true, true, false]);
-    }],
-    ["calendario: sábado, domingo y festivo no son laborales", () => {
+    ["calendario: sábado, domingo y festivo no son hábiles (solo cuenta para la ventana y el olvido)", () => {
       const cal: Calendario = { diasLaborales: [1, 2, 3, 4, 5], ausencias: [{ persona: "*", desde: "2026-11-16", hasta: "2026-11-16" }] };
       assert.deepEqual(["2026-11-05", "2026-11-07", "2026-11-08", "2026-11-16", "2026-11-17"].map((f) => esDiaLaboral(f, cal)), [true, false, false, false, true]);
     }],
@@ -3268,8 +3266,8 @@ const AYUDA = `Asignación equilibrada (motor ${VERSION_MOTOR}): ${FLUJOS.map((f
 
   node asignacion_equilibrada.ts                  ciclo continuo cada 2 min en MODO SOMBRA (no escribe en HubSpot)
   node asignacion_equilibrada.ts --activar        igual, pero escribe en HubSpot
-  node asignacion_equilibrada.ts --una-vez        un solo ciclo y termina (n8n o Programador de tareas); fuera de horario,
-                                                  en pausa o con otra ejecución en curso sale con 0 sin tocar HubSpot
+  node asignacion_equilibrada.ts --una-vez        un solo ciclo y termina (n8n, CronJob o Programador de tareas); en pausa
+                                                  o con otra ejecución en curso sale con 0 sin tocar HubSpot
   node asignacion_equilibrada.ts --diagnostico    revisa token, scopes, objetos, etapas, propiedades, reglas y propietarios
   node asignacion_equilibrada.ts --parametros     recalcula data/<flujo>/parametros.json desde AGSSA [--desde AAAA-MM-DD --hasta AAAA-MM-DD]
   node asignacion_equilibrada.ts --importar-asesores <archivo.xlsx|.csv>
@@ -3278,15 +3276,13 @@ const AYUDA = `Asignación equilibrada (motor ${VERSION_MOTOR}): ${FLUJOS.map((f
 
   --flujo <clave>     solo ese flujo (${FLUJOS.map((f) => f.clave).join(" o ")}); se puede repetir. Por defecto, todos
   --produccion        usa HUBSPOT_TOKEN en lugar de HUBSPOT_TOKEN_SANDBOX
-  --ignorar-horario   ejecuta el ciclo fuera de 7:30 a 4:30 y en días no laborales (pruebas)
+
+  Corre a cualquier hora y todos los días, festivos incluidos. --ignorar-horario ya no hace nada: se acepta para no
+  romper disparadores que todavía lo pasan.
 `;
 
-/** Por qué un ciclo de --una-vez no correría, mirando solo datos locales (calendario, hora y PAUSA); null si sí corre. */
-function motivoParaNoCorrer(flujos: Flujo[], ignorarHorario: boolean, ahora: number): string | null {
-  if (!ignorarHorario) {
-    if (!esDiaLaboral(fechaBogota(ahora), cargarCalendario())) return "hoy no es día laboral";
-    if (!dentroDeHorario(ahora)) return "fuera del horario (7:30 a 4:30)";
-  }
+/** Por qué un ciclo de --una-vez no correría, mirando solo datos locales (los interruptores PAUSA); null si sí corre. */
+function motivoParaNoCorrer(flujos: Flujo[]): string | null {
   const pausas = flujos.map(pausaActiva);
   if (pausas.every((p) => p !== null)) return `interruptor de apagado activo (${[...new Set(pausas)].join(", ")})`;
   return null;
@@ -3314,6 +3310,7 @@ async function main(argumentos: string[]): Promise<number> {
         parametros: { type: "boolean" },
         "importar-asesores": { type: "string" },
         autoprueba: { type: "boolean" },
+        // Sin efecto desde el 19-nov (ya no hay horario): se acepta para que n8n o un CronJob que lo pasen no fallen.
         "ignorar-horario": { type: "boolean" },
         flujo: { type: "string", multiple: true },
         desde: { type: "string" },
@@ -3359,13 +3356,12 @@ async function main(argumentos: string[]): Promise<number> {
     modo: valores.activar ? "activo" : "sombra",
     entorno,
     hs,
-    ignorarHorario: valores["ignorar-horario"] === true,
     flujos,
   };
   const unaVez = valores["una-vez"] === true;
   if (unaVez) {
-    // n8n o el Programador de tareas lo lanzan muy seguido: si el ciclo no va a correr, sale sin consultar HubSpot.
-    const motivo = motivoParaNoCorrer(flujos, arranque.ignorarHorario, Date.now());
+    // n8n o un CronJob lo lanzan muy seguido: si el ciclo no va a correr, sale sin consultar HubSpot.
+    const motivo = motivoParaNoCorrer(flujos);
     if (motivo) {
       console.log(`Sin consultar HubSpot · ciclo omitido: ${motivo}`);
       return 0;
@@ -3389,7 +3385,7 @@ async function main(argumentos: string[]): Promise<number> {
   const aviso = arranque.modo === "activo" ? `ESCRIBE en HubSpot (${entorno})` : "SOMBRA: decide y registra, NO escribe en HubSpot";
   console.log(`\nAsignación equilibrada ${VERSION_MOTOR} · ${aviso}`);
   for (const ctx of contextos) console.log(`${ctx.flujo.nombre}: ${resumenEquipo(ctx.pool, ctx.reglas, ctx.flujo.personas)}`);
-  console.log(unaVez ? "Un solo ciclo.\n" : `Un ciclo cada ${INTERVALO_MS / 60_000} min, de 7:30 a 4:30 (Ctrl+C para salir).\n`);
+  console.log(unaVez ? "Un solo ciclo.\n" : `Un ciclo cada ${INTERVALO_MS / 60_000} min, a cualquier hora (Ctrl+C para salir).\n`);
 
   if (unaVez) {
     const ahora = Date.now();

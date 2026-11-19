@@ -5,14 +5,14 @@ lugar del workflow de n8n. Verificadas el 19 de noviembre de 2026 contra producc
 
 ## Cómo corre
 
-Un **CronJob** lanza cada minuto, de lunes a viernes, un pod que ejecuta un ciclo del script y termina:
+Un **CronJob** lanza cada minuto, todos los días y a cualquier hora, un pod que ejecuta un ciclo del script y termina:
 
 ```
 node asignacion_equilibrada.ts --una-vez --produccion --activar
 ```
 
 - **Qué hace cada ciclo.** Lee las colas de HubSpot. Si hay registros, los asigna y los mueve de etapa. Si no hay nada, termina en uno o dos segundos.
-- **El horario lo decide el script.** Fuera de 7:30 a 4:30 (hora de Colombia) y en los festivos de `data/ausencias.json`, termina sin consultar HubSpot. El CronJob solo evita lanzar pods fuera de 7:00 a 16:59.
+- **Sin horario ni festivos.** Desde el 19 de noviembre asigna de noche, los fines de semana y los festivos. `data/ausencias.json` solo saca a las personas ausentes; los festivos ya no detienen nada.
 - **Nunca dos a la vez:** `concurrencyPolicy: Forbid`, más un candado en el volumen de logs.
 - **No guarda estado propio entre ciclos.** Todo sale de HubSpot y del log de decisiones, que vive en un volumen persistente.
 - **Reemplaza a n8n.** Con el CronJob no hace falta n8n. **Solo puede haber un disparador en producción**: o n8n o el CronJob (ver «Corte desde n8n»).
@@ -24,12 +24,12 @@ node asignacion_equilibrada.ts --una-vez --produccion --activar
 | Volumen | `deploy/kubernetes/pvc.yaml` | `logs/`: decisiones, reversiones y candado (1 Gi) |
 | Secret `asignacion-hubspot` | Se crea con `kubectl` | `HUBSPOT_TOKEN` (token de escritura de producción) |
 | Secret `asignacion-datos` | Se crea con `kubectl` | Las dos nóminas y los propietarios con ejecutivo fijo (tienen cédulas) |
-| ConfigMap `asignacion-ausencias` | Se crea con `kubectl` | `ausencias.json`: festivos y ausencias, lo edita coordinación |
+| ConfigMap `asignacion-ausencias` | Se crea con `kubectl` | `ausencias.json`: ausencias de cada persona (y festivos, que solo cuentan para el balance de Análisis); lo edita coordinación |
 | Job suelto | `deploy/kubernetes/job-comando.yaml` | Diagnóstico, ciclo de prueba o reversión con la misma configuración |
 
 ## Requisitos
 
-- **Kubernetes 1.27 o superior,** por `timeZone` en el CronJob. En una versión anterior hay que quitar `timeZone` y escribir el horario en UTC (`* 12-21 * * 1-5`).
+- **Kubernetes 1.21 o superior** (CronJob `batch/v1`).
 - **Un registro de imágenes** al que el clúster tenga acceso.
 - **Salida a internet** hacia `api.hubapi.com:443`. Si el clúster usa NetworkPolicies, hay que permitirla.
 - **Un StorageClass** con volúmenes `ReadWriteOnce`.
@@ -126,7 +126,7 @@ kubectl -n asignacion patch cronjob asignacion-equilibrada -p '{"spec":{"suspend
 
 **Modo sombra** (decide y registra, no escribe). En `cronjob.yaml`, quita `"--activar"` de `args` y vuelve a aplicar.
 
-**Actualizar ausencias o festivos.** Lo pide coordinación. Aplica desde el siguiente minuto:
+**Actualizar ausencias.** Lo pide coordinación. Aplica desde el siguiente minuto:
 
 ```bash
 kubectl -n asignacion create configmap asignacion-ausencias --from-file=ausencias.json=data/ausencias.json \
@@ -174,7 +174,7 @@ Cada ciclo es un Job. El Job falla si el script sale con un código distinto de 
 
 | Código | Qué pasó | Qué hacer |
 |---|---|---|
-| `0` | Ciclo correcto, o ciclo omitido (fuera de horario, festivo, cola vacía, otro ciclo en curso) | Nada |
+| `0` | Ciclo correcto, o ciclo sin nada que hacer (cola vacía, otro ciclo en curso) | Nada |
 | `1` | Falló un ciclo: HubSpot respondió con error al escribir, o hubo un error de red después de los reintentos | Si se repite, leer `kubectl logs` del Job. Con 401 o 403, el token venció o perdió permisos |
 | `2` | Error de configuración (falta un archivo, una nómina inválida, un `[ERROR]` del diagnóstico) o el candado lleva 10 minutos ocupado | Correr el diagnóstico (paso 4) |
 

@@ -1,6 +1,5 @@
-# Reemplaza al workflow de n8n: cada minuto, de lunes a viernes, corre un ciclo del script.
-# El script decide por su cuenta si corre: fuera de 7:30 a 4:30, en festivos (data/ausencias.json) o con la cola
-# vacía termina en segundos sin escribir nada.
+# Reemplaza al workflow de n8n: cada minuto, todos los días y a cualquier hora (festivos incluidos), corre un ciclo del
+# script. Con la cola vacía termina en segundos sin escribir nada.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -9,8 +8,7 @@ metadata:
   labels:
     app: asignacion-equilibrada
 spec:
-  schedule: "* 7-16 * * 1-5"
-  timeZone: America/Bogota # requiere Kubernetes 1.27 o superior
+  schedule: "* * * * *" # cada minuto, siempre: sin horario ni festivos desde el 19-nov
   concurrencyPolicy: Forbid # nunca dos ciclos a la vez
   startingDeadlineSeconds: 50 # si un minuto se pierde, no se acumula
   successfulJobsHistoryLimit: 3

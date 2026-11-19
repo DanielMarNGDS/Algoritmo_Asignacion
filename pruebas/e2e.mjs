@@ -68,7 +68,8 @@ async function escenario(nombre, fn, ajustes = {}) {
 }
 const props = (M, objeto, id) => (objeto === R.objeto ? M.riesgo : M.contratos).registros.get(String(id)).properties;
 const salidaOk = (r) => assert.equal(r.codigo, 0, `código ${r.codigo}:\n${r.salida}`);
-const ACTIVO = ["--una-vez", "--activar", "--ignorar-horario"];
+// Sin --ignorar-horario: desde el 19-nov el script corre a cualquier hora, también fines de semana y festivos.
+const ACTIVO = ["--una-vez", "--activar"];
 const ownerDe = (clave) => O[clave];
 
 await escenario("diagnóstico completo en la simulación", async ({ correr }) => {
@@ -243,8 +244,8 @@ await escenario("Contratos: nadie de directos presente → espera y tarea (no se
 
 await escenario("Contratos en sombra, nadie presente: la tarea queda solo en el log", async ({ M, correr, log }) => {
   M.contrato(1, { hs_pipeline_stage: C.asignacion }, 10);
-  salidaOk(await correr(["--una-vez", "--ignorar-horario", "--flujo", "contratos"]));
-  salidaOk(await correr(["--una-vez", "--ignorar-horario", "--flujo", "contratos"]));
+  salidaOk(await correr(["--una-vez", "--flujo", "contratos"]));
+  salidaOk(await correr(["--una-vez", "--flujo", "contratos"]));
   assert.equal(M.tareas.length, 0);
   assert.deepEqual(log().filter((l) => l.tipo === "tarea").map((l) => l.escritura), ["sombra", "sombra"]);
 }, { "ausencias.json": { diasLaborales: [1, 2, 3, 4, 5], ausencias: ["e_a", "e_b", "e_c", "e_d", "e_e", "ana_t"].map((persona) => ({ persona, desde: hoy, hasta: hoy })) } });
@@ -252,10 +253,10 @@ await escenario("Contratos en sombra, nadie presente: la tarea queda solo en el 
 await escenario("Contratos en sombra: no redecide lo decidido, sus decisiones cuentan como carga y la tarea de reasignación queda en el log", async ({ M, correr, log }) => {
   M.contrato(1, { hs_pipeline_stage: C.asignacion });
   M.contrato(2, { hs_pipeline_stage: C.asignacion, hubspot_owner_id: O.e_a });
-  salidaOk(await correr(["--una-vez", "--ignorar-horario", "--flujo", "contratos"]));
-  salidaOk(await correr(["--una-vez", "--ignorar-horario", "--flujo", "contratos"]));
+  salidaOk(await correr(["--una-vez", "--flujo", "contratos"]));
+  salidaOk(await correr(["--una-vez", "--flujo", "contratos"]));
   M.contrato(3, { hs_pipeline_stage: C.asignacion });
-  salidaOk(await correr(["--una-vez", "--ignorar-horario", "--flujo", "contratos"]));
+  salidaOk(await correr(["--una-vez", "--flujo", "contratos"]));
   const decisiones = log().filter((l) => l.tipo === "decision");
   assert.deepEqual(decisiones.map((d) => d.id), ["1", "2", "3"]);
   assert.deepEqual(decisiones.map((d) => d.elegido), ["e_b", "e_c", "e_d"]);
@@ -277,6 +278,19 @@ await escenario("Reversión de decisiones de antes del motor v2 (Contratos escri
   const x = props(M, C.objeto, 9);
   assert.deepEqual([x.hubspot_owner_id, x.hs_pipeline_stage, x.fecha_asignacion_analista, x.asignacion_detalle], [null, C.asignacion, null, null]);
 });
+
+await escenario("Sin horario ni festivos: con hoy festivo y ningún día laboral asigna igual; --ignorar-horario se sigue aceptando", async ({ M, correr }) => {
+  M.analisis(1, { hs_pipeline_stage: R.asignacion }, { radicacion_canon: "2000000" });
+  M.contrato(1, { hs_pipeline_stage: C.asignacion });
+  const r = await correr(ACTIVO);
+  salidaOk(r);
+  assert.doesNotMatch(r.salida, /ciclo omitido|Sin consultar HubSpot/);
+  assert.ok([O.miller, O.german].includes(props(M, R.objeto, 1).hubspot_owner_id), "análisis asignado en festivo");
+  assert.ok(DIRECTOS.map(ownerDe).includes(props(M, C.objeto, 1).hubspot_owner_id), "contrato asignado en festivo");
+  M.analisis(2, { hs_pipeline_stage: R.asignacion }, { radicacion_canon: "2000000" });
+  salidaOk(await correr([...ACTIVO, "--ignorar-horario", "--flujo", "analisis_riesgo"]));
+  assert.ok([O.miller, O.german].includes(props(M, R.objeto, 2).hubspot_owner_id), "la bandera vieja no rompe nada");
+}, { "ausencias.json": { diasLaborales: [], ausencias: [{ persona: "*", desde: hoy, hasta: hoy, motivo: "Festivo de prueba" }] } });
 
 await escenario("Ninguna llamada usa rutas v3 ni v4", async ({ M, correr }) => {
   M.analisis(1, { hs_pipeline_stage: R.asignacion }, { radicacion_canon: "2000000" });
