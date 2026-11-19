@@ -1,0 +1,92 @@
+# Reemplaza al workflow de n8n: cada minuto, de lunes a viernes, corre un ciclo del script.
+# El script decide por su cuenta si corre: fuera de 7:30 a 4:30, en festivos (data/ausencias.json) o con la cola
+# vacía termina en segundos sin escribir nada.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: asignacion-equilibrada
+  namespace: asignacion
+  labels:
+    app: asignacion-equilibrada
+spec:
+  schedule: "* 7-16 * * 1-5"
+  timeZone: America/Bogota # requiere Kubernetes 1.27 o superior
+  concurrencyPolicy: Forbid # nunca dos ciclos a la vez
+  startingDeadlineSeconds: 50 # si un minuto se pierde, no se acumula
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 10
+  # Viene apagado: se enciende después del diagnóstico y de despublicar n8n (deploy/kubernetes/README.md, pasos 4 y 5).
+  # true = interruptor de apagado (equivale a data/PAUSA).
+  suspend: true
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # un ciclo fallido no se reintenta: el siguiente minuto vuelve a leer todo de HubSpot
+      activeDeadlineSeconds: 540 # menos que los 10 min con que el script da por muerto un candado
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app: asignacion-equilibrada
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000 # el usuario "node" de la imagen
+            runAsGroup: 1000
+            fsGroup: 1000 # para escribir en el volumen de logs
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: asignacion
+              image: REGISTRO/asignacion-equilibrada:VERSION # cambiar por la imagen publicada
+              imagePullPolicy: IfNotPresent
+              command: ["node", "asignacion_equilibrada.ts"]
+              # Modo sombra (decide y registra, no escribe): quitar "--activar".
+              args: ["--una-vez", "--produccion", "--activar"]
+              envFrom:
+                - secretRef:
+                    name: asignacion-hubspot # HUBSPOT_TOKEN
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  memory: 384Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: logs
+                  mountPath: /app/logs
+                - name: tmp
+                  mountPath: /tmp
+                - name: datos
+                  mountPath: /app/data/analisis_riesgo/nomina.json
+                  subPath: nomina-analisis_riesgo.json
+                  readOnly: true
+                - name: datos
+                  mountPath: /app/data/contratos/nomina.json
+                  subPath: nomina-contratos.json
+                  readOnly: true
+                - name: datos
+                  mountPath: /app/data/contratos/propietarios.json
+                  subPath: propietarios.json
+                  readOnly: true
+                - name: ausencias
+                  mountPath: /app/data/ausencias.json
+                  subPath: ausencias.json
+                  readOnly: true
+          volumes:
+            - name: logs
+              persistentVolumeClaim:
+                claimName: asignacion-logs
+            - name: tmp
+              emptyDir: {}
+            - name: datos
+              secret:
+                secretName: asignacion-datos # nóminas y propietarios: tienen cédulas
+            - name: ausencias
+              configMap:
+                name: asignacion-ausencias

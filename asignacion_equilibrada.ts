@@ -2506,7 +2506,9 @@ export function tomarCandado(): () => void {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const pid = Number(readFileSync(RUTA.candado, "utf8"));
-      if (procesoVivo(pid)) {
+      // Con nuestro propio PID es de una ejecución anterior: este proceso todavía no lo escribió. Pasa en un contenedor,
+      // donde Node suele ser siempre el PID 1 y el candado queda en un volumen si un pod muere a mitad del ciclo.
+      if (pid !== process.pid && procesoVivo(pid)) {
         throw new ErrorOcupado(pid, Math.floor((Date.now() - statSync(RUTA.candado).mtimeMs) / 60_000));
       }
       unlinkSync(RUTA.candado); // Quedó de una ejecución que terminó mal.

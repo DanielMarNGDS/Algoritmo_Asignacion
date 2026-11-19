@@ -1,0 +1,16 @@
+# Secretos y datos personales: nunca en la imagen
+.env
+data/*/nomina.json
+data/contratos/propietarios.json
+data/PAUSA
+data/*/PAUSA
+
+# Lo que genera el script y lo que no hace falta para correrlo
+logs/
+node_modules/
+.git/
+pruebas/
+n8n/
+deploy/
+*.html
+*.md

@@ -69,6 +69,8 @@ revertir_asignacion.ts        Deshace asignaciones de prueba; importa de asignac
 package.json, tsconfig.json   Configuración
 n8n/                          Los dos workflows de n8n que disparan el script (sección 4.3)
 pruebas/                      Prueba de punta a punta: un HubSpot simulado (API 2026-09) y 14 escenarios
+Dockerfile, .dockerignore     Imagen para Kubernetes (sin token ni nóminas)
+deploy/kubernetes/            CronJob, volumen de logs, Job suelto e instrucciones de despliegue (reemplaza a n8n)
 data/                         Datos de negocio que el script lee en cada ciclo (ver más abajo)
 logs/                         Lo genera el script: decisiones, candado y reversiones (ignorada por git)
 .env                          Tokens de HubSpot (ignorado por git; nunca se sube)
@@ -155,6 +157,8 @@ Archivos:
 - `n8n/disparador_algoritmo_asignacion_local.json`: **para pruebas en un PC**, con el nodo Execute Command. Tiene la ruta absoluta de este PC en el comando.
 
 Ninguno trae credenciales: hay que elegirlas al importarlos, y la credencial de las colas tiene que ser del mismo entorno que `ENTORNO`.
+
+**En Kubernetes no hace falta n8n:** un CronJob corre `--una-vez` cada minuto. Ver [deploy/kubernetes/README.md](deploy/kubernetes/README.md). En producción solo puede haber un disparador: o n8n o el CronJob.
 
 ### 4.4 Configuración
 

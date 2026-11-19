@@ -1,0 +1,86 @@
+# Un comando suelto con la misma imagen, el mismo token y los mismos datos que el CronJob: diagnóstico, un ciclo de
+# prueba o la reversión. Se cambian "command"/"args" y se crea con:
+#   kubectl -n asignacion create -f deploy/kubernetes/job-comando.yaml
+#   kubectl -n asignacion logs -f job/<nombre que devuelve el comando anterior>
+#
+#   Diagnóstico:            args: ["--diagnostico", "--produccion"]
+#   Ciclo en modo sombra:   args: ["--una-vez", "--produccion"]
+#   Revisar la reversión:   command: ["node", "revertir_asignacion.ts"]   args: ["--produccion"]
+#   Revertir:               command: ["node", "revertir_asignacion.ts"]   args: ["--produccion", "--aplicar"]
+#                           (antes: suspender el CronJob, ver deploy/kubernetes/README.md)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: asignacion-comando-
+  namespace: asignacion
+  labels:
+    app: asignacion-equilibrada
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: asignacion-equilibrada
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: asignacion
+          image: REGISTRO/asignacion-equilibrada:VERSION # la misma del CronJob
+          command: ["node", "asignacion_equilibrada.ts"]
+          args: ["--diagnostico", "--produccion"]
+          envFrom:
+            - secretRef:
+                name: asignacion-hubspot
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: logs
+              mountPath: /app/logs
+            - name: tmp
+              mountPath: /tmp
+            - name: datos
+              mountPath: /app/data/analisis_riesgo/nomina.json
+              subPath: nomina-analisis_riesgo.json
+              readOnly: true
+            - name: datos
+              mountPath: /app/data/contratos/nomina.json
+              subPath: nomina-contratos.json
+              readOnly: true
+            - name: datos
+              mountPath: /app/data/contratos/propietarios.json
+              subPath: propietarios.json
+              readOnly: true
+            - name: ausencias
+              mountPath: /app/data/ausencias.json
+              subPath: ausencias.json
+              readOnly: true
+      volumes:
+        - name: logs
+          persistentVolumeClaim:
+            claimName: asignacion-logs
+        - name: tmp
+          emptyDir: {}
+        - name: datos
+          secret:
+            secretName: asignacion-datos
+        - name: ausencias
+          configMap:
+            name: asignacion-ausencias

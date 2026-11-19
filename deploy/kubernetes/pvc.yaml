@@ -1,0 +1,16 @@
+# El log de decisiones (logs/decisiones.jsonl) y el candado tienen que sobrevivir entre ejecuciones:
+# de ahí salen la reversión, las tareas que ya se crearon y las esperas que ya se avisaron.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: asignacion-logs
+  namespace: asignacion
+  labels:
+    app: asignacion-equilibrada
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: <la del clúster, si no se usa la de por defecto>
