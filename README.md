@@ -45,7 +45,7 @@ Las pipelines y las etapas tienen los mismos IDs en el sandbox y en producción.
 
 Al final deja a la persona como propietaria y el registro en la etapa de destino. El script no guarda estado propio entre ciclos: todo sale de HubSpot y del log.
 
-**Qué NO hace.** No tiene servidor ni endpoint: nada lo llama por red. Un disparador externo (n8n) ejecuta el comando y el script hace un ciclo y termina.
+**Qué NO hace.** No tiene servidor ni endpoint: nada lo llama por red. Un CronJob de Kubernetes ejecuta el comando cada 30 segundos y el script hace un ciclo y termina.
 
 ## 2. Datos clave para empaquetarlo
 
@@ -58,7 +58,7 @@ Al final deja a la persona como propietaria y el registro en la etapa de destino
 | Módulos | ESM (`"type": "module"`) |
 | Gestor | npm (hay `package-lock.json`) |
 | Scripts de `package.json` | `test` → `node asignacion_equilibrada.ts --autoprueba` · `typecheck` → `tsc` · `e2e` → `node pruebas/e2e.mjs` |
-| Estado de las pruebas | `npm test`: 47 pruebas, todas pasan. `npm run e2e`: 14 escenarios de punta a punta, todos pasan. `npm run typecheck`: sin errores. (16 de noviembre) |
+| Estado de las pruebas | `npm test`: 51 pruebas, todas pasan. `npm run e2e`: 17 escenarios de punta a punta, todos pasan. `npm run typecheck`: sin errores. (19 de noviembre) |
 | Tamaño | `asignacion_equilibrada.ts` unas 3.000 líneas, `revertir_asignacion.ts` 370 líneas |
 | Defectos de `package.json` | `"main": "index.js"` apunta a un archivo que no existe, `description` vacía y no declara `engines` |
 
@@ -68,14 +68,12 @@ Al final deja a la persona como propietaria y el registro en la etapa de destino
 asignacion_equilibrada.ts     El motor, las reglas, el cliente de HubSpot, el diagnóstico y la CLI (un solo archivo)
 revertir_asignacion.ts        Deshace asignaciones de prueba; importa de asignacion_equilibrada.ts
 package.json, tsconfig.json   Configuración
-n8n/                          Los dos workflows de n8n que disparan el script (sección 4.3)
-pruebas/                      Prueba de punta a punta: un HubSpot simulado (API 2026-09) y 14 escenarios
+pruebas/                      Prueba de punta a punta: un HubSpot simulado (API 2026-09) y 17 escenarios
 Dockerfile, .dockerignore     Imagen para Kubernetes (sin token ni nóminas)
-deploy/kubernetes/            CronJob, volumen de logs, Job suelto e instrucciones de despliegue (reemplaza a n8n)
+deploy/kubernetes/            CronJob cada 30 s, volumen de logs, Job suelto e instrucciones de despliegue (sección 4.3)
 data/                         Datos de negocio que el script lee en cada ciclo (ver más abajo)
 logs/                         Lo genera el script: decisiones, candado y reversiones (ignorada por git)
 .env                          Tokens de HubSpot (ignorado por git; nunca se sube)
-hallazgos_hubspot_mongo.html  NO pertenece a este paquete (ver sección 7)
 ```
 
 **`data/`**
@@ -114,7 +112,7 @@ Casi todo se exporta para las pruebas, pero **solo `revertir_asignacion.ts` impo
 ```
 node asignacion_equilibrada.ts                  ciclo continuo cada 2 min, en MODO SOMBRA
 node asignacion_equilibrada.ts --activar        igual, pero escribe en HubSpot
-node asignacion_equilibrada.ts --una-vez        un solo ciclo y termina (lo usa n8n)
+node asignacion_equilibrada.ts --una-vez        un solo ciclo y termina (lo usa el CronJob)
 node asignacion_equilibrada.ts --diagnostico    revisa token, scopes, objetos, etapas, propiedades, reglas y propietarios
 node asignacion_equilibrada.ts --parametros     recalcula data/<flujo>/parametros.json desde AGSSA
 node asignacion_equilibrada.ts --importar-asesores <archivo.xlsx|.csv>
@@ -138,27 +136,17 @@ Opciones comunes:
 | `1` | Falló un ciclo o hubo un error fatal de HubSpot |
 | `2` | Error de uso o de configuración; o el candado lleva 10 min o más ocupado |
 
-### 4.3 Disparo con n8n
+### 4.3 Operación: CronJob de Kubernetes cada 30 segundos
 
-n8n es solo el timbre; el script hace todo lo demás.
+La operación es solo con un CronJob de Kubernetes; el script hace todo lo demás. Las instrucciones completas (imagen, Secrets, diagnóstico, corte, operación y monitoreo) están en [deploy/kubernetes/README.md](deploy/kubernetes/README.md).
 
-1. Un Schedule Trigger corre cada 30 s, todos los días y a cualquier hora (`*/30 * * * * *`).
-2. El nodo **Configuración** (Code) tiene lo único que se cambia a mano:
-   - `ENTORNO`: `sandbox` o `produccion`.
-   - `ACTIVAR`: modo sombra o escribir.
+1. El CronJob lanza un pod por minuto (`* * * * *`, `concurrencyPolicy: Forbid`). Un CronJob no se programa por segundos, así que cada pod hace **dos ciclos**: uno al arrancar y otro a los 30 segundos.
+2. Cada ciclo corre `node asignacion_equilibrada.ts --una-vez --produccion --activar`. Los argumentos van en la variable `ARGUMENTOS` del contenedor; para el modo sombra se quita `--activar`.
+3. El script lee las colas. Si están vacías, termina en segundos sin escribir nada.
+4. Si un ciclo falla, el pod sale con ese código y el Job queda como fallido: esa es la señal para el monitoreo.
+5. El token va en el Secret `asignacion-hubspot`; las nóminas y los propietarios, en el Secret `asignacion-datos`; las ausencias, en el ConfigMap `asignacion-ausencias`.
 
-   Con eso arma los IDs de los objetos y las consultas de las dos colas, con los mismos filtros que `filtrosCola` del script.
-3. Dos HTTP Request consultan HubSpot (`/crm/objects/2026-09/{objeto}/search`) con `limit: 1` y leen solo `total`.
-4. Si alguna cola tiene registros, ejecuta `node asignacion_equilibrada.ts --una-vez [--produccion] [--activar] --flujo ...`.
-5. Si el código de salida no es 0, marca la ejecución como error.
-
-Archivos:
-- `n8n/disparador_algoritmo_asignacion.json`: **para el servidor**, con el nodo SSH. Es el que va a producción.
-- `n8n/disparador_algoritmo_asignacion_local.json`: **para pruebas en un PC**, con el nodo Execute Command. Tiene la ruta absoluta de este PC en el comando.
-
-Ninguno trae credenciales: hay que elegirlas al importarlos, y la credencial de las colas tiene que ser del mismo entorno que `ENTORNO`.
-
-**La operación es con un CronJob de Kubernetes, no con n8n:** corre `--una-vez` cada 30 segundos (un pod por minuto con dos ciclos). Ver [deploy/kubernetes/README.md](deploy/kubernetes/README.md). En producción solo puede haber un disparador: o n8n o el CronJob.
+**En producción solo puede haber un disparador.** Hasta el corte, producción la dispara un workflow de n8n en el PC de Daniel; hay que despublicarlo antes de encender el CronJob (paso 5 de las instrucciones de Kubernetes).
 
 ### 4.4 Configuración
 
@@ -250,21 +238,19 @@ Quitar `"main": "index.js"`, que no existe. `<org>` es el scope del monorepo, qu
 - **`typecheck`, `test` y `e2e` son las únicas tareas para CI** (`e2e` levanta un HubSpot simulado en localhost y escribe en `logs/e2e/`). `una-vez`, `diagnostico` y `revertir` hablan con HubSpot de verdad: no deben correr automáticamente en CI.
 
 **Qué más revisar al ubicarlo:**
-- **El despliegue es aparte del monorepo.** En producción, n8n llega al script por SSH en un servidor con Node 24. Al servidor se copia el contenido de `apps/asignacion-equilibrada/`, sin `node_modules/` ni `logs/`. Además se copian el `.env` y los archivos de `data/` que no van a git.
+- **El despliegue es aparte del monorepo.** En producción corre como CronJob de Kubernetes con la imagen del `Dockerfile` (ver `deploy/kubernetes/README.md`). El token y los archivos de `data/` que no van a git llegan al contenedor por Secrets, no por la imagen.
 - **Comentarios con rutas de otra época.** La cabecera de `asignacion_equilibrada.ts` apunta a `C:\Temp\Plan_Asignacion_Equilibrada_Analisis_Riesgo.md` y al anexo `..._detalle.md`. Esos documentos no están en el repo (ver sección 7).
 
 ## 7. Pendientes
 
-**Técnicos, antes de subir a git:**
-1. **`hallazgos_hubspot_mongo.html` no pertenece a este paquete.** Es un informe sobre la extracción de HubSpot y su empalme con Mongo (`agssa_prod`). Conviene moverlo a donde corresponda en el monorepo.
-2. **Los documentos de diseño están fuera del repo, en `C:\Temp`:**
+**Técnicos:**
+1. **Los documentos de diseño están fuera del repo, en `C:\Temp`:**
    - `Plan_Asignacion_Equilibrada_Analisis_Riesgo.md`: resumen del plan.
-   - `Plan_Asignacion_Equilibrada_Analisis_Riesgo_detalle.md`: el diseño completo, los datos, las simulaciones y las decisiones.
-   - `Guia_n8n_Asignacion_Equilibrada.md`: la guía paso a paso de n8n.
+   - `Plan_Asignacion_Equilibrada_Analisis_Riesgo_detalle.md`: el diseño completo, los datos, las simulaciones y las decisiones (incluidas las del 17 al 19 de noviembre, §15.8 a §15.10).
 
-   El documento de reglas del 16 de noviembre ("Reglas de asignación — Análisis de riesgo y Contratos") tampoco está. Conviene copiarlos todos a `docs/` dentro del paquete.
-3. **Los parámetros están viejos.** La copia de AGSSA llega al 2 de julio de 2026. `analisis_riesgo` se recalibró el 16 de noviembre con abril a julio (canon + administración, solo Miller y Germán) y `contratos` es de abril a julio. Como ningún flujo usa techo, solo pesa el monto típico. El script avisa a partir de 100 días.
-4. **El token de producción del `.env` no es el de escritura.** El 16 de noviembre `HUBSPOT_TOKEN` leía negocios pero daba 403 en los objetos personalizados. Duvan entrega el token de la app privada `62186116`; va en `.env` como `HUBSPOT_TOKEN` y después `--diagnostico --produccion` tiene que terminar en «Todo listo».
+   El documento de reglas del 16 de noviembre ("Reglas de asignación — Análisis de riesgo y Contratos") tampoco está. Si se quieren en el repo, van en `docs/`.
+2. **Los parámetros están viejos.** La copia de AGSSA llega al 2 de julio de 2026. `analisis_riesgo` se recalibró el 16 de noviembre con abril a julio (canon + administración, solo Miller y Germán) y `contratos` es de abril a julio. Como ningún flujo usa techo, solo pesa el monto típico. El script avisa a partir de 100 días.
+3. **El token de producción ya está listo** (19 de noviembre): es de la app privada `62240600`, con permisos de escritura de objetos personalizados y de tareas, y `--diagnostico --produccion` termina en «Todo listo». En Kubernetes va en el Secret `asignacion-hubspot`.
 
 **Datos que faltan (los entrega Ana Tavera):**
 - Importar el Excel de Ana (`EJECUTIVOS Y ASESORES NOVIEMBRE 2026.xlsx`, 1.691 claves) con `--importar-asesores`. Mientras no esté, solo deciden las claves fijas y las compartidas, y lo demás va a los ejecutivos de directos.

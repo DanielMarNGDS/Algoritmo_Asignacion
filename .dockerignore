@@ -18,7 +18,6 @@ logs/
 node_modules/
 .git/
 pruebas/
-n8n/
 deploy/
 *.html
 *.md
