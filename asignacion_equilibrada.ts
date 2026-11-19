@@ -108,7 +108,9 @@ const ESCRITURA_SOMBRA = "sombra";
 export const PROP_CLAVE_ASESOR = "contrato_orden_claveasesorw";
 export const PROP_CEDULA_PROPIETARIO = "contrato_orden_numdocpropw";
 /** Contratos: si el contrato no trae la clave, sale del Asesor asociado (el objeto se descubre por su nombre). */
-export const ASESOR = { nombres: ["asesor", "asesores"], propiedad: "asesor_clave" };
+// La clave es asesor_clave (T_Asesores.Clave) o, si está vacía, asesor_clave_cliente: en producción los Asesores solo
+// traen asesor_clave_cliente (19-nov), con los mismos valores que contrato_orden_claveasesorw (p. ej. 44476).
+export const ASESOR = { nombres: ["asesor", "asesores"], propiedades: ["asesor_clave", "asesor_clave_cliente"] };
 /** Contratos: los propietarios son los contactos asociados con esta etiqueta; su documento, la primera propiedad con dato. */
 export const ETIQUETA_ARRENDADOR = "Arrendador Cto";
 export const PROPS_DOCUMENTO_CONTACTO = ["contacto_id_numero_documento", "documento", "documento_propietario"];
@@ -372,7 +374,7 @@ export interface ConfigHS {
   /** Contratos: a quién se le crea la tarea cuando el contrato traía otro ejecutivo. */
   tareaReasignacion: TareaHS | null;
   /** Contratos: el objeto Asesor y su propiedad de clave, o null si no se encontró (solo cuenta la propiedad del contrato). */
-  asesor: { objeto: string; propiedad: string } | null;
+  asesor: { objeto: string; propiedades: string[] } | null;
   /** Contratos: el tipo de asociación contrato → contacto "Arrendador Cto", o null si no existe. */
   arrendador: { typeId: number } | null;
 }
@@ -394,6 +396,11 @@ export interface ReglasContratos {
   /** Clave de asesor (normalizada) → ejecutivos, de la tabla de Ana. */
   asesores: Map<string, string[]>;
   tabla: { claves: number; fuente: string | null; importado: string | null };
+  /**
+   * Claves fijas (mandan sobre todo lo demás): la clave va siempre a ese ejecutivo y, si no está, se reparte entre los
+   * de `siNoEsta`. Caso de uso: asesoras que también son ejecutivas de contratos (Elizabeth Viasus y Melany Ramirez).
+   */
+  fijas: Map<string, { ejecutivo: string; siNoEsta: string[]; motivo: string | null }>;
   /** Claves que se reparten entre varios ejecutivos (mandan sobre la tabla). */
   compartidas: Map<string, string[]>;
   /** Cédula del propietario (en sus variantes normalizadas) → ejecutivo fijo. */
@@ -863,7 +870,9 @@ export function datosContrato(props: Propiedades, asociados: { claves: string[];
 }
 
 /**
- * Contratos, en este orden (reglas del 16-nov):
+ * Contratos, en este orden (reglas del 16-nov, más las claves fijas del 19-nov):
+ *   0. La clave es fija (clavesFijas de reglas.json, p. ej. la de una asesora que también es ejecutiva): ese ejecutivo;
+ *      si no está, reparto entre los de su `siNoEsta` presentes y, si tampoco hay, entre los de directos.
  *   1. La clave del asesor tiene un solo ejecutivo en la tabla de Ana (incluidas las de Ana Tavera): ese ejecutivo.
  *   2. Si no, alguno de los arrendadores tiene ejecutivo fijo (correo de Ana): ese ejecutivo.
  *   3. Si no, la clave es compartida: reparto solo entre sus ejecutivos presentes.
@@ -884,6 +893,14 @@ export function destinoContrato(reglas: ReglasContratos, datos: DatosContrato, m
   const fijo = (ejecutivo: string, origen: string): Destino =>
     estaPresente(r, ejecutivo) ? { clave: ejecutivo, regla: origen, decision: null } : aDirectos(`${origen}, que no está`);
 
+  const fija = clave ? reglas.fijas.get(clave) : undefined;
+  if (fija) {
+    const origen = `clave de asesor ${clave} → ${r.nombres(fija.ejecutivo)}${fija.motivo ? ` (${fija.motivo})` : ""}`;
+    if (estaPresente(r, fija.ejecutivo)) return { clave: fija.ejecutivo, regla: origen, decision: null };
+    const suplentes = presentesDe(fija.siNoEsta);
+    if (suplentes.length) return repartir(r, suplentes, monto, `${origen}, que no está: reparto entre ${suplentes.map((a) => a.etiqueta).join(", ")}`);
+    return aDirectos(`${origen}, que no está${fija.siNoEsta.length ? ", ni ninguno de sus suplentes" : ""}`);
+  }
   if (deClave?.length === 1) return fijo(deClave[0], `clave de asesor ${clave} → ${r.nombres(deClave[0])} (ejecutivo único)`);
   const cedula = datos.cedulas.find((c) => reglas.propietarios.has(c));
   if (cedula) {
@@ -1016,6 +1033,7 @@ export interface ReglasAnalisisJSON {
   directo?: { persona?: string; montoMayorA?: number; condiciones?: { propiedad?: string; valor?: string | boolean; motivo?: string }[] } | null;
 }
 export interface ReglasContratosJSON {
+  clavesFijas?: Record<string, { ejecutivo?: string; siNoEsta?: string[]; motivo?: string }>;
   clavesCompartidas?: Record<string, string[]>;
   directos?: string[];
   tareaSinAsignar?: { minutos?: number; responsables?: string[] } | null;
@@ -1067,6 +1085,17 @@ export function validarReglasContratos(
   for (const [clave, lista] of Object.entries(reglas.clavesCompartidas ?? {})) {
     compartidas.set(normalizarCodigo(clave), listaDe(lista, `data/contratos/reglas.json, clavesCompartidas["${clave}"]`));
   }
+  const fijas: ReglasContratos["fijas"] = new Map();
+  for (const [clave, f] of Object.entries(reglas.clavesFijas ?? {})) {
+    const donde = `data/contratos/reglas.json, clavesFijas["${clave}"]`;
+    const k = normalizarCodigo(clave);
+    if (!k) throw new ErrorUso(`${donde}: la clave está vacía.`);
+    if (compartidas.has(k)) throw new ErrorUso(`${donde}: la clave también está en clavesCompartidas; tiene que estar en una sola de las dos.`);
+    if (!f || typeof f !== "object") throw new ErrorUso(`${donde}: debe ser { "ejecutivo": "<clave de la nómina>", "siNoEsta": [...], "motivo": "..." }.`);
+    const ejecutivo = exigirPersona(todos, f.ejecutivo, `${donde}, ejecutivo`);
+    const siNoEsta = f.siNoEsta === undefined ? [] : listaDe(f.siNoEsta, `${donde}, siNoEsta`).filter((x) => x !== ejecutivo);
+    fijas.set(k, { ejecutivo, siNoEsta, motivo: typeof f.motivo === "string" && f.motivo.trim() ? f.motivo.trim() : null });
+  }
   const tabla = new Map<string, string[]>();
   for (const [clave, lista] of Object.entries(asesores?.claves ?? {})) {
     tabla.set(normalizarCodigo(clave), listaDe(lista, `data/contratos/asesores.json, claves["${clave}"]`));
@@ -1100,6 +1129,7 @@ export function validarReglasContratos(
     tipo: "contratos",
     asesores: tabla,
     tabla: { claves: tabla.size, fuente: asesores?.fuente ?? null, importado: asesores?.importado ?? null },
+    fijas,
     compartidas,
     propietarios: fijos,
     totalPropietarios: vistas.size,
@@ -1316,7 +1346,7 @@ function importarAsesores(ruta: string): number {
     );
   }
   const salida = {
-    _ayuda: "Clave del asesor → ejecutivo(s), generado con: node asignacion_equilibrada.ts --importar-asesores <archivo>. No se edita a mano: se vuelve a importar el Excel de Ana. Las claves compartidas de reglas.json mandan sobre esta tabla.",
+    _ayuda: "Clave del asesor → ejecutivo(s), generado con: node asignacion_equilibrada.ts --importar-asesores <archivo>. No se edita a mano: se vuelve a importar el Excel de Ana. Las claves fijas y las compartidas de reglas.json mandan sobre esta tabla.",
     fuente: basename(ruta),
     importado: new Date().toISOString(),
     claves: t.claves,
@@ -1572,10 +1602,11 @@ async function asociadosDeContratos(ctx: Pick<Contexto, "hs" | "cfg">, registros
   if (asesor) {
     const sinClave = registros.filter((r) => !normalizarCodigo(r.properties[PROP_CLAVE_ASESOR])).map((r) => r.id);
     const asoc = await asociadosPorLotes(ctx.hs, objeto, asesor.objeto, sinClave);
-    const datos = await leerPorLotes(ctx.hs, asesor.objeto, [...asoc.values()].flat().map((a) => a.id), [asesor.propiedad]);
+    const datos = await leerPorLotes(ctx.hs, asesor.objeto, [...asoc.values()].flat().map((a) => a.id), asesor.propiedades);
+    const claveDe = (p: Propiedades | undefined) => asesor.propiedades.map((n) => String(p?.[n] ?? "").trim()).find(Boolean) ?? "";
     for (const [id, lista] of asoc) {
       const s = salida.get(id);
-      if (s) s.claves = lista.map((a) => String(datos.get(a.id)?.[asesor.propiedad] ?? "")).filter(Boolean);
+      if (s) s.claves = lista.map((a) => claveDe(datos.get(a.id))).filter(Boolean);
     }
   }
   if (arrendador) {
@@ -1808,8 +1839,16 @@ export async function diagnosticar(
     else {
       nota(
         "aviso",
-        "No hay tabla de asesores (data/contratos/asesores.json): solo deciden las claves compartidas y lo demás va a los ejecutivos de directos. " +
+        "No hay tabla de asesores (data/contratos/asesores.json): solo deciden las claves fijas y las compartidas, y lo demás va a los ejecutivos de directos. " +
           "Se importa el Excel de Ana con: node asignacion_equilibrada.ts --importar-asesores <archivo.xlsx>",
+      );
+    }
+    if (reglas.fijas.size) {
+      const inactivas = [...reglas.fijas.values()].filter((f) => !pool.some((a) => a.clave === f.ejecutivo)).map((f) => f.ejecutivo);
+      nota(
+        inactivas.length ? "aviso" : "ok",
+        `Claves fijas: ${[...reglas.fijas].map(([k, f]) => `${k} → ${etiqueta(f.ejecutivo)}${f.siNoEsta.length ? ` (si no está: ${f.siNoEsta.map(etiqueta).join(", ")})` : ""}`).join("; ")}` +
+          (inactivas.length ? `. No están activos en ${origenNomina}: ${inactivas.join(", ")}; sus contratos van a los suplentes o a directos.` : ""),
       );
     }
     nota("ok", `Claves compartidas: ${[...reglas.compartidas].map(([k, v]) => `${k} (${v.map(etiqueta).join(", ")})`).join("; ") || "ninguna"}`);
@@ -1959,10 +1998,11 @@ export async function diagnosticar(
       if (!s) nota("aviso", `No hay un objeto "Asesores": la clave del asesor sale solo de ${PROP_CLAVE_ASESOR}.`);
       else {
         const { results: props } = await hs.solicitar<{ results: PropiedadHS[] }>("GET", `/crm/properties/${API}/${s.objectTypeId}`);
-        if (!props.some((p) => p.name === ASESOR.propiedad)) nota("aviso", `El objeto Asesores (${s.objectTypeId}) no tiene ${ASESOR.propiedad}: la clave sale solo de ${PROP_CLAVE_ASESOR}.`);
+        const existentes = ASESOR.propiedades.filter((n) => props.some((p) => p.name === n));
+        if (!existentes.length) nota("aviso", `El objeto Asesores (${s.objectTypeId}) no tiene ${ASESOR.propiedades.join(" ni ")}: la clave sale solo de ${PROP_CLAVE_ASESOR}.`);
         else {
-          asesor = { objeto: s.objectTypeId, propiedad: ASESOR.propiedad };
-          nota("ok", `Clave del asesor: ${PROP_CLAVE_ASESOR} o, si no la trae, ${ASESOR.propiedad} del Asesor asociado (${s.objectTypeId})`);
+          asesor = { objeto: s.objectTypeId, propiedades: existentes };
+          nota("ok", `Clave del asesor: ${PROP_CLAVE_ASESOR} o, si no la trae, ${existentes.join(" o ")} del Asesor asociado (${s.objectTypeId})`);
         }
       }
     } catch (error) {
@@ -2810,8 +2850,13 @@ function autoprueba(): number {
     persona("ana", "coordinador", false),
   ];
   const reglasC = validarReglasContratos(
-    { clavesCompartidas: { "44476": ["e1", "e2"] }, directos: ["e1", "e2", "e4"], tareaReasignacion: { responsables: ["Ana Tavera"] } },
-    { claves: { "100": ["e3"], "200": ["ana"], "44476": ["e1"], "500": ["e5"] } },
+    {
+      clavesFijas: { "600": { ejecutivo: "e5", siNoEsta: ["e2", "e4"], motivo: "asesora y ejecutiva" } },
+      clavesCompartidas: { "44476": ["e1", "e2"] },
+      directos: ["e1", "e2", "e4"],
+      tareaReasignacion: { responsables: ["Ana Tavera"] },
+    },
+    { claves: { "100": ["e3"], "200": ["ana"], "44476": ["e1"], "500": ["e5"], "600": ["e3"] } },
     { propietarios: [{ cedula: "1.020.304", ejecutivo: "e4" }, { cedula: "900.123.456-7", ejecutivo: "e3" }] },
     ejecutivos,
   );
@@ -3172,6 +3217,33 @@ function autoprueba(): number {
       const espera = destinoContrato(reglasC, contrato(null), 1, reparto(sin(ejecutivos, ...directos)));
       assert.equal(espera.clave, null);
       assert.match(espera.regla, /no hay ningún ejecutivo de directos presente/);
+    }],
+    ["Contratos: clave fija (asesora que también es ejecutiva) → ella, aunque la tabla y el propietario digan otra cosa", () => {
+      const d = destinoContrato(reglasC, contrato("600", "1020304"), 3_000_000, reparto(ejecutivos));
+      assert.equal(d.clave, "e5");
+      assert.equal(d.decision, null);
+      assert.match(d.regla, /clave de asesor 600 → e5 \(asesora y ejecutiva\)/);
+      assert.equal(destinoContrato(reglasC, contrato(null, null, { claves: ["600"], documentos: [] }), 1, reparto(ejecutivos)).clave, "e5", "también por el Asesor asociado");
+    }],
+    ["Contratos: clave fija con la ejecutiva ausente → sus suplentes; sin suplentes → directos; sin nadie → espera", () => {
+      const r = reparto(sin(ejecutivos, "e5"));
+      const cuenta: Record<string, number> = {};
+      for (let i = 0; i < 20; i++) {
+        const d = destinoContrato(reglasC, contrato("600"), 3_000_000, r);
+        cuenta[d.clave!] = (cuenta[d.clave!] ?? 0) + 1;
+        assert.match(d.regla, /que no está: reparto entre e2, e4/);
+      }
+      assert.deepEqual(Object.keys(cuenta).sort(), ["e2", "e4"], "solo entre sus suplentes");
+      const sinSuplentes = destinoContrato(reglasC, contrato("600"), 1, reparto(sin(ejecutivos, "e5", "e2", "e4")));
+      assert.equal(sinSuplentes.clave, "e1", "el único de directos presente");
+      assert.match(sinSuplentes.regla, /ni ninguno de sus suplentes: reparto entre los ejecutivos de directos/);
+      assert.equal(destinoContrato(reglasC, contrato("600"), 1, reparto(sin(ejecutivos, "e5", "e1", "e2", "e4"))).clave, null);
+    }],
+    ["reglas: una clave fija no puede estar también en las compartidas y su ejecutivo tiene que estar en la nómina", () => {
+      assert.throws(() => validarReglasContratos({ clavesFijas: { "44476": { ejecutivo: "e1" } }, clavesCompartidas: { "044476": ["e1", "e2"] } }, null, null, ejecutivos), /una sola de las dos/);
+      assert.throws(() => validarReglasContratos({ clavesFijas: { "1": { ejecutivo: "fantasma" } } }, null, null, ejecutivos), /fantasma/);
+      const sola = validarReglasContratos({ clavesFijas: { "7": { ejecutivo: "e1", siNoEsta: ["e1", "e2"] } } }, null, null, ejecutivos).fijas.get("7")!;
+      assert.deepEqual([sola.ejecutivo, sola.siNoEsta, sola.motivo], ["e1", ["e2"], null], "ella misma no es su suplente");
     }],
     ["Contratos: la clave sale del contrato o, si no la trae, del Asesor asociado", () => {
       assert.equal(contrato(null, null, { claves: ["", "100"], documentos: [] }).clave, "100");

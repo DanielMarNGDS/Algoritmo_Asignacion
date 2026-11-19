@@ -33,7 +33,8 @@ Las pipelines y las etapas tienen los mismos IDs en el sandbox y en producción.
   - El resto se reparte entre los analistas del reparto (hoy Miller y Germán), sin techo.
   - La carga de cada analista es lo asignado en los últimos 30 días hábiles, con olvido diario, según la fecha oficial `analisis_fechaasignacionanalisis`.
 - **Contratos.** El ejecutivo sale, en este orden, de:
-  1. La tabla de Ana: clave del asesor → ejecutivo (incluye las claves de Ana Tavera, que van a ella). La clave es `contrato_orden_claveasesorw` o, si el contrato no la trae, la del Asesor asociado.
+  0. Las claves fijas (`clavesFijas` en `reglas.json`), que mandan sobre todo lo demás. Son las asesoras que también son ejecutivas de contratos: la clave 44476 (Elizabeth Viasus) va a Elizabeth y la 44737 (Melany Ramirez) a Melany. Si ella no está, se reparte entre Luz Castellanos y Laura Castro. Desde el 19 de noviembre reemplazan a esas dos claves compartidas.
+  1. La tabla de Ana: clave del asesor → ejecutivo (incluye las claves de Ana Tavera, que van a ella). La clave es `contrato_orden_claveasesorw` o, si el contrato no la trae, la del Asesor asociado (`asesor_clave` o, si está vacía, `asesor_clave_cliente`, que es donde la tienen los Asesores de producción).
   2. La lista de propietarios con ejecutivo fijo: basta con que uno de los contactos asociados con la etiqueta «Arrendador Cto» tenga su cédula en la lista.
   3. Las claves compartidas: reparto solo entre sus ejecutivos.
   4. Sin asesor o con una clave fuera de la tabla: reparto entre los **cinco ejecutivos de directos** (`directos` en `reglas.json`).
@@ -83,7 +84,7 @@ hallazgos_hubspot_mongo.html  NO pertenece a este paquete (ver sección 7)
 |---|---|---|
 | `data/<flujo>/nomina.json` | Persona ↔ documento (cédula) ↔ propietario de HubSpot ↔ rol ↔ activo ↔ si entra al reparto | **No: tiene cédulas reales** |
 | `data/<flujo>/parametros.json` | Monto típico, pesos por rol y techos; lo genera `--parametros` | Sí |
-| `data/<flujo>/reglas.json` | Reglas de negocio. En Análisis, lo que va directo y a quién. En Contratos, las claves compartidas, los ejecutivos de directos y las dos tareas (por no asignar a tiempo y por reasignación) | Sí |
+| `data/<flujo>/reglas.json` | Reglas de negocio. En Análisis, lo que va directo y a quién. En Contratos, las claves fijas, las compartidas, los ejecutivos de directos y las dos tareas (por no asignar a tiempo y por reasignación) | Sí |
 | `data/contratos/asesores.json` | Clave del asesor → ejecutivo. Lo genera `--importar-asesores` desde el Excel de Ana; **todavía no existe** | Sí |
 | `data/contratos/propietarios.json` | Cédula del propietario → ejecutivo fijo, de la lista del correo de Ana. **Hoy está vacío** | **No: tiene cédulas** |
 | `data/ausencias.json` | Ausencias de cada persona (`"hasta": null` es hasta nuevo aviso). Los días laborales y los festivos (hasta el 31-dic-2027) ya no detienen el script: solo cuentan para la carga de Análisis (ventana de 30 días hábiles y olvido diario) | Sí |
@@ -266,7 +267,7 @@ Quitar `"main": "index.js"`, que no existe. `<org>` es el scope del monorepo, qu
 4. **El token de producción del `.env` no es el de escritura.** El 16 de noviembre `HUBSPOT_TOKEN` leía negocios pero daba 403 en los objetos personalizados. Duvan entrega el token de la app privada `62186116`; va en `.env` como `HUBSPOT_TOKEN` y después `--diagnostico --produccion` tiene que terminar en «Todo listo».
 
 **Datos que faltan (los entrega Ana Tavera):**
-- Importar el Excel de Ana (`EJECUTIVOS Y ASESORES NOVIEMBRE 2026.xlsx`, 1.691 claves) con `--importar-asesores`. Mientras no esté, solo deciden las claves compartidas y lo demás va a los ejecutivos de directos.
+- Importar el Excel de Ana (`EJECUTIVOS Y ASESORES NOVIEMBRE 2026.xlsx`, 1.691 claves) con `--importar-asesores`. Mientras no esté, solo deciden las claves fijas y las compartidas, y lo demás va a los ejecutivos de directos.
 - Copiar a `data/contratos/propietarios.json` los 10 propietarios con ejecutivo fijo del correo de Ana del 8 y 9 de noviembre (8 a Laura Daniela Castro y 2 a Luz Andrea Castellanos).
 
 **Decisiones de negocio cerradas el 16 de noviembre** (ya están en el código y en `data/`): la clave fuera del Excel y el contrato sin asesor van a los cinco de directos; las 35 claves de Ana Tavera van a ella; Francisco Rocha y Andrés Amaya están ausentes hasta nuevo aviso; a Mónica solo va lo de más de 10 millones y lo de corredores, aunque esté ausente. El workflow «Asignación Analista» solo existe en el sandbox: en producción no hay otro workflow que asigne Análisis ni Contratos.

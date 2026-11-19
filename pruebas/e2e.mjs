@@ -22,11 +22,13 @@ const DATOS = {
   "contratos/nomina.json": {
     personas: [
       p("e_a", "Ejecutiva Alfa", "ejecutivo"), p("e_b", "Ejecutivo Beta", "ejecutivo"), p("e_c", "Ejecutiva Gama", "ejecutivo"), p("e_d", "Ejecutivo Delta", "ejecutivo"),
-      p("e_e", "Ejecutiva Epsilon", "ejecutivo"), p("ana_t", "Ana Leonor Tavera Leal", "coordinador", { reparto: false }),
+      p("e_e", "Ejecutiva Epsilon", "ejecutivo"), p("e_f", "Ejecutiva Zeta", "ejecutivo"), p("ana_t", "Ana Leonor Tavera Leal", "coordinador", { reparto: false }),
     ],
   },
   "contratos/parametros.json": { generado: "e2e", calibradoCon: { desde: hoy, hasta: hoy, casos: 500 }, canonTipico: 2_000_000, roles: { ejecutivo: { c: 1, s: 1 }, coordinador: { c: 1, s: 1 } }, techos: {} },
   "contratos/reglas.json": {
+    // e_f es asesora (clave 888) y ejecutiva, como Elizabeth y Melany en producción.
+    clavesFijas: { "888": { ejecutivo: "e_f", siNoEsta: ["e_b", "e_c"], motivo: "asesora y ejecutiva" } },
     clavesCompartidas: { "44476": ["e_b", "e_c"] },
     directos: DIRECTOS,
     tareaSinAsignar: { minutos: 3, responsables: ["Olga Janneth Sanchez Cortes", "Ana Leonor Tavera Leal"] },
@@ -78,7 +80,8 @@ await escenario("diagnóstico completo en la simulación", async ({ correr }) =>
   assert.match(r.salida, /Todo listo/);
   assert.match(r.salida, /tarea para Olga Janneth Sanchez Cortes y Ana Leonor Tavera Leal/);
   assert.match(r.salida, /Si un contrato traía otro ejecutivo, tarea para Ana Leonor Tavera Leal/);
-  assert.match(r.salida, /asesor_clave del Asesor asociado \(2-400\)/);
+  assert.match(r.salida, /asesor_clave o asesor_clave_cliente del Asesor asociado \(2-400\)/);
+  assert.match(r.salida, /Claves fijas: 888 → e_f \(si no está: e_b, e_c\)/);
   assert.match(r.salida, /contactos "Arrendador Cto" \(tipo 439\)/);
   assert.match(r.salida, /Radicación \(0-3, pipeline 935981686\)/);
   assert.match(r.salida, /Directo a monica, aunque esté ausente/);
@@ -278,6 +281,24 @@ await escenario("Reversión de decisiones de antes del motor v2 (Contratos escri
   const x = props(M, C.objeto, 9);
   assert.deepEqual([x.hubspot_owner_id, x.hs_pipeline_stage, x.fecha_asignacion_analista, x.asignacion_detalle], [null, C.asignacion, null, null]);
 });
+
+await escenario("Contratos: clave fija (asesora que también es ejecutiva) por la propiedad o por el Asesor con solo clave_cliente → ella", async ({ M, correr }) => {
+  M.contrato(1, { hs_pipeline_stage: C.asignacion, contrato_canon: "2000000" }, 10, { asesorCliente: "888" });
+  M.contrato(2, { hs_pipeline_stage: C.asignacion, contrato_orden_claveasesorw: "0888", contrato_canon: "2000000" }, 10, { arrendadores: ["555"] });
+  salidaOk(await correr([...ACTIVO, "--flujo", "contratos"]));
+  assert.equal(props(M, C.objeto, 1).hubspot_owner_id, O.e_f, "clave sacada de asesor_clave_cliente del Asesor asociado");
+  assert.equal(props(M, C.objeto, 2).hubspot_owner_id, O.e_f, "manda sobre el propietario con ejecutivo fijo (555 → e_d)");
+  assert.match(props(M, C.objeto, 1).asignacion_detalle, /clave de asesor 888 → e_f \(asesora y ejecutiva\)/);
+});
+
+await escenario("Contratos: clave fija con la ejecutiva ausente → se reparte entre sus suplentes, nunca a otros", async ({ M, correr }) => {
+  for (let id = 1; id <= 4; id++) M.contrato(id, { hs_pipeline_stage: C.asignacion, contrato_orden_claveasesorw: "888" });
+  salidaOk(await correr([...ACTIVO, "--flujo", "contratos"]));
+  const elegidos = [1, 2, 3, 4].map((id) => props(M, C.objeto, id).hubspot_owner_id);
+  assert.ok(elegidos.every((o) => o === O.e_b || o === O.e_c), elegidos.join(","));
+  assert.equal(new Set(elegidos).size, 2, "se reparte entre las dos");
+  assert.match(props(M, C.objeto, 1).asignacion_detalle, /que no está: reparto entre e_b, e_c/);
+}, { "ausencias.json": { diasLaborales: [1, 2, 3, 4, 5], ausencias: [{ persona: "e_f", desde: hoy, hasta: null }] } });
 
 await escenario("Sin horario ni festivos: con hoy festivo y ningún día laboral asigna igual; --ignorar-horario se sigue aceptando", async ({ M, correr }) => {
   M.analisis(1, { hs_pipeline_stage: R.asignacion }, { radicacion_canon: "2000000" });

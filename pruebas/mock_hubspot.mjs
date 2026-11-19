@@ -10,12 +10,12 @@ export const TIPO = { arrendador: 439, arrendatario: 461, contacto: 435, asesor:
 
 export const OWNERS = {
   miller: "301", german: "302", monica: "303", lorena: "304",
-  e_a: "401", e_b: "402", e_c: "403", e_d: "404", ana_t: "405", olga: "406", e_e: "407", otro: "499",
+  e_a: "401", e_b: "402", e_c: "403", e_d: "404", ana_t: "405", olga: "406", e_e: "407", e_f: "408", otro: "499",
 };
 const NOMBRES = {
   301: ["Miller", "Soriano"], 302: ["Germán", "Erazo"], 303: ["María Mónica", "Torralba"], 304: ["Lorena", "Rojas"],
   401: ["Ejecutiva", "Alfa"], 402: ["Ejecutivo", "Beta"], 403: ["Ejecutiva", "Gama"], 404: ["Ejecutivo", "Delta"], 405: ["Ana Leonor", "Tavera Leal"],
-  406: ["Olga Janneth", "Sanchez Cortes"], 407: ["Ejecutiva", "Epsilon"], 499: ["Otra", "Persona"],
+  406: ["Olga Janneth", "Sanchez Cortes"], 407: ["Ejecutiva", "Epsilon"], 408: ["Ejecutiva", "Zeta"], 499: ["Otra", "Persona"],
 };
 
 const prop = (name, type = "string", extra = {}) => ({ name, label: name, type, ...extra });
@@ -41,7 +41,8 @@ export async function iniciarMock() {
     prop("contrato_ejecutivo_anterior", "enumeration", { options: [], referencedObjectType: "OWNER", externalOptions: true }),
   ]);
   nuevo("2-300", "orden_contrato", "Orden de contrato", "Órdenes de contrato", [], SISTEMA);
-  const asesores = nuevo(ASESORES, "asesor", "Asesor", "Asesores", [], [prop("asesor_clave", "number"), prop("asesor_nombre")]);
+  // Como en producción, la clave puede venir solo en asesor_clave_cliente.
+  const asesores = nuevo(ASESORES, "asesor", "Asesor", "Asesores", [], [prop("asesor_clave", "number"), prop("asesor_clave_cliente"), prop("asesor_nombre")]);
   const deals = nuevo("0-3", "deals", "Negocio", "Negocios", [
     { id: PIPE.solicitud, label: "Solicitudes", stages: [] }, { id: PIPE.radicacion, label: "Radicación", stages: [] }, { id: PIPE.orden, label: "Orden de contrato", stages: [] },
   ], [prop("pipeline", "enumeration"), prop("radicacion_canon", "number"), prop("radicacion_administracion", "number"), prop("valor_canon___admon", "number")]);
@@ -188,8 +189,11 @@ export async function iniciarMock() {
     deals.registros.set(ordenId, { id: ordenId, properties: { pipeline: PIPE.orden } });
     asociar("0-3", solId, "0-3", ordenId, 373);
   };
-  /** Un contrato; `arrendadores`: documentos de sus contactos "Arrendador Cto"; `asesor`: clave del Asesor asociado. */
-  M.contrato = (id, props, minutos = 10, { arrendadores = [], arrendatarios = [], asesor = null } = {}) => {
+  /**
+   * Un contrato; `arrendadores`: documentos de sus contactos "Arrendador Cto"; `asesor`: asesor_clave del Asesor
+   * asociado; `asesorCliente`: un Asesor asociado que solo trae asesor_clave_cliente (como en producción).
+   */
+  M.contrato = (id, props, minutos = 10, { arrendadores = [], arrendatarios = [], asesor = null, asesorCliente = null } = {}) => {
     contratos.registros.set(String(id), { id: String(id), properties: { hs_pipeline: C.pipeline, hs_v2_date_entered_current_stage: hace(minutos), ...props } });
     let n = 0;
     for (const [lista, tipo] of [[arrendadores, TIPO.arrendador], [arrendatarios, TIPO.arrendatario]]) {
@@ -199,9 +203,10 @@ export async function iniciarMock() {
         asociar(C.objeto, id, "0-1", cid, tipo);
       }
     }
-    if (asesor !== null) {
+    if (asesor !== null || asesorCliente !== null) {
       const aid = String(40000 + Number(id));
-      asesores.registros.set(aid, { id: aid, properties: { asesor_clave: String(asesor) } });
+      const p = asesor !== null ? { asesor_clave: String(asesor) } : { asesor_clave_cliente: String(asesorCliente) };
+      asesores.registros.set(aid, { id: aid, properties: p });
       asociar(C.objeto, id, ASESORES, aid, TIPO.asesor);
     }
   };
