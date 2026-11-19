@@ -5,22 +5,23 @@ lugar del workflow de n8n. Verificadas el 19 de noviembre de 2026 contra producc
 
 ## Cómo corre
 
-Un **CronJob** lanza cada minuto, todos los días y a cualquier hora, un pod que ejecuta un ciclo del script y termina:
+El script corre **un ciclo cada 30 segundos**, todos los días y a cualquier hora:
 
 ```
 node asignacion_equilibrada.ts --una-vez --produccion --activar
 ```
 
+- **Cómo se logran los 30 segundos.** Un CronJob no se puede programar por segundos: lo mínimo es un minuto. Por eso el CronJob lanza un pod por minuto y ese pod hace **dos ciclos**, uno al arrancar y otro a los 30 segundos. Los argumentos van en la variable `ARGUMENTOS` del contenedor.
 - **Qué hace cada ciclo.** Lee las colas de HubSpot. Si hay registros, los asigna y los mueve de etapa. Si no hay nada, termina en uno o dos segundos.
 - **Sin horario ni festivos.** Desde el 19 de noviembre asigna de noche, los fines de semana y los festivos. `data/ausencias.json` solo saca a las personas ausentes; los festivos ya no detienen nada.
-- **Nunca dos a la vez:** `concurrencyPolicy: Forbid`, más un candado en el volumen de logs.
+- **Nunca dos a la vez:** `concurrencyPolicy: Forbid` (no arranca un pod mientras el anterior sigue), los dos ciclos de cada pod van uno detrás del otro, y además hay un candado en el volumen de logs. Si un ciclo tarda más de 30 segundos, el siguiente arranca apenas termine.
 - **No guarda estado propio entre ciclos.** Todo sale de HubSpot y del log de decisiones, que vive en un volumen persistente.
 - **Reemplaza a n8n.** Con el CronJob no hace falta n8n. **Solo puede haber un disparador en producción**: o n8n o el CronJob (ver «Corte desde n8n»).
 
 | Pieza | Archivo o recurso | Qué tiene |
 |---|---|---|
 | Imagen | `Dockerfile` (raíz del repo) | `node:24-alpine`, los dos scripts, `package.json` y `data/` sin nóminas ni propietarios |
-| CronJob | `deploy/kubernetes/cronjob.yaml` | El disparo cada minuto y los montajes |
+| CronJob | `deploy/kubernetes/cronjob.yaml` | Un pod por minuto con dos ciclos (cada 30 s) y los montajes |
 | Volumen | `deploy/kubernetes/pvc.yaml` | `logs/`: decisiones, reversiones y candado (1 Gi) |
 | Secret `asignacion-hubspot` | Se crea con `kubectl` | `HUBSPOT_TOKEN` (token de escritura de producción) |
 | Secret `asignacion-datos` | Se crea con `kubectl` | Las dos nóminas y los propietarios con ejecutivo fijo (tienen cédulas) |
@@ -124,9 +125,9 @@ kubectl -n asignacion patch cronjob asignacion-equilibrada -p '{"spec":{"suspend
 kubectl -n asignacion patch cronjob asignacion-equilibrada -p '{"spec":{"suspend":false}}'   # encender
 ```
 
-**Modo sombra** (decide y registra, no escribe). En `cronjob.yaml`, quita `"--activar"` de `args` y vuelve a aplicar.
+**Modo sombra** (decide y registra, no escribe). En `cronjob.yaml`, quita `--activar` del valor de la variable `ARGUMENTOS` y vuelve a aplicar.
 
-**Actualizar ausencias.** Lo pide coordinación. Aplica desde el siguiente minuto:
+**Actualizar ausencias.** Lo pide coordinación. Aplica desde el siguiente pod, a más tardar en un minuto:
 
 ```bash
 kubectl -n asignacion create configmap asignacion-ausencias --from-file=ausencias.json=data/ausencias.json \

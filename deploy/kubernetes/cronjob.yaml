@@ -1,5 +1,6 @@
-# Reemplaza al workflow de n8n: cada minuto, todos los días y a cualquier hora (festivos incluidos), corre un ciclo del
-# script. Con la cola vacía termina en segundos sin escribir nada.
+# Reemplaza al workflow de n8n: un ciclo del script cada 30 segundos, todos los días y a cualquier hora (festivos
+# incluidos). Un CronJob no se programa por segundos (lo mínimo es un minuto), así que cada pod hace dos ciclos: uno al
+# arrancar y otro a los 30 s. Con la cola vacía cada ciclo termina en segundos sin escribir nada.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -8,8 +9,8 @@ metadata:
   labels:
     app: asignacion-equilibrada
 spec:
-  schedule: "* * * * *" # cada minuto, siempre: sin horario ni festivos desde el 19-nov
-  concurrencyPolicy: Forbid # nunca dos ciclos a la vez
+  schedule: "* * * * *" # un pod por minuto (dos ciclos cada uno), siempre: sin horario ni festivos desde el 19-nov
+  concurrencyPolicy: Forbid # nunca dos pods a la vez; dentro del pod los dos ciclos van uno detrás del otro
   startingDeadlineSeconds: 50 # si un minuto se pierde, no se acumula
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 10
@@ -38,9 +39,24 @@ spec:
             - name: asignacion
               image: REGISTRO/asignacion-equilibrada:VERSION # cambiar por la imagen publicada
               imagePullPolicy: IfNotPresent
-              command: ["node", "asignacion_equilibrada.ts"]
-              # Modo sombra (decide y registra, no escribe): quitar "--activar".
-              args: ["--una-vez", "--produccion", "--activar"]
+              # Dos ciclos por pod: al arrancar y a los 30 s de haber arrancado. El código de salida es el del primer
+              # ciclo que falle (0 si los dos salen bien), para que el Job quede como fallido y se vea en el monitoreo.
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  inicio=$(date +%s)
+                  node asignacion_equilibrada.ts $ARGUMENTOS
+                  primero=$?
+                  espera=$((inicio + 30 - $(date +%s)))
+                  if [ "$espera" -gt 0 ]; then sleep "$espera"; fi
+                  node asignacion_equilibrada.ts $ARGUMENTOS
+                  segundo=$?
+                  if [ "$primero" -ne 0 ]; then exit "$primero"; fi
+                  exit "$segundo"
+              env:
+                # Modo sombra (decide y registra, no escribe): quitar "--activar".
+                - name: ARGUMENTOS
+                  value: "--una-vez --produccion --activar"
               envFrom:
                 - secretRef:
                     name: asignacion-hubspot # HUBSPOT_TOKEN

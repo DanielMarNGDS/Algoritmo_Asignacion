@@ -1,7 +1,15 @@
 # Secretos y datos personales: nunca en la imagen
 .env
+.env.*
+*secret*.yaml
+*secret*.yml
 data/*/nomina.json
 data/contratos/propietarios.json
+**/*.xlsx
+**/*.xls
+**/*.csv
+**/*.pdf
+**/*.jsonl
 data/PAUSA
 data/*/PAUSA
 

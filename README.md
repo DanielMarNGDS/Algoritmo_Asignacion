@@ -158,7 +158,7 @@ Archivos:
 
 Ninguno trae credenciales: hay que elegirlas al importarlos, y la credencial de las colas tiene que ser del mismo entorno que `ENTORNO`.
 
-**En Kubernetes no hace falta n8n:** un CronJob corre `--una-vez` cada minuto. Ver [deploy/kubernetes/README.md](deploy/kubernetes/README.md). En producción solo puede haber un disparador: o n8n o el CronJob.
+**La operación es con un CronJob de Kubernetes, no con n8n:** corre `--una-vez` cada 30 segundos (un pod por minuto con dos ciclos). Ver [deploy/kubernetes/README.md](deploy/kubernetes/README.md). En producción solo puede haber un disparador: o n8n o el CronJob.
 
 ### 4.4 Configuración
 
